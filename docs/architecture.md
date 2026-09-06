@@ -1,0 +1,197 @@
+# Architecture
+
+> Canonical vocabulary for the terms used here lives in
+> [CONTEXT.md](../CONTEXT.md).
+
+## Overview
+
+InfinityProxy is a control plane plus a pool of short-lived, per-tunnel
+[sing-box](https://sing-box.sagernet.org) containers. The **Engine** (a Flask
+process) does the durable work — scraping, liveness filtering, node assignment,
+renewal, and port/credential bookkeeping — while each **tunnel** is a single
+sing-box container that exposes a rotating proxy endpoint to a client.
+
+```text
+                    ┌──────────────────── ENGINE (Flask :8000) ────────────────────┐
+                    │                                                              │
+Public feeds ─────► │  Scraper loop ─► Node pool ─► Liveness filter ─► Assigner    │
+                    │       │                 │                        │            │
+                    │       └── SQLite (state)◄┘                        │            │
+                    │                                                   │            │
+                    │  Control API (tunnels CRUD + status)              │            │
+                    │  Dashboard (read-only HTML/CSS)                   │            │
+                    └──────────────────────────────────────────────────────────────┘
+                                               │ render config, spawn/restart/stop
+                                               ▼
+                    ┌───────────────── TUNNEL (sing-box container) ────────────────┐
+                    │  inbound: SOCKS5 + HTTP (user:pass)  ←────────────── client  │
+                    │  outbound: latency-weighted urltest over k assigned nodes    │
+                    └──────────────────────────────────────────────────────────────┘
+```
+
+## Components
+
+### The Engine
+
+- Runs forever; the only always-on component.
+- **Scraper loop** — walks the configured sources on their own cadences, fetches
+  each raw feed, parses and deduplicates URI lists (see
+  [docs/scraping.md](./scraping.md)).
+- **Node pool** — in-memory working set of nodes that passed the liveness
+  filter, persisted as a cache in SQLite for warm starts.
+- **Liveness filter** — probes nodes with a real protocol handshake, batched and
+  time-boxed (default batch 50, 4s timeout).
+- **Assigner** — hands each new tunnel an exclusive private set of alive nodes.
+- **Control API** — Flask REST endpoints on `127.0.0.1:8000` (see
+  [docs/api.md](./api.md)).
+- **Dashboard** — same Flask app serves a read-only HTML/CSS inspector of
+  tunnels and pool health.
+
+### Tunnels
+
+One tunnel = one `sing-box` container + one row in SQLite.
+
+A tunnel is created when a client calls `POST /tunnels`. The Engine:
+
+1. Picks a free port from `INFINITY_TUNNEL_RANGE` (default `10000-59999`).
+2. Asks the pool for up to `node_count` alive, unassigned nodes. If fewer are
+   available it degrades gracefully and tops up later (see **Pool starvation**).
+3. Generates credentials (`username`, `password`), **stable for the tunnel's
+   lifetime** — renewals never change them.
+4. Renders a sing-box config:
+   - inbound `socks` + `http` listeners on the tunnel port with auth,
+   - one outbound per assigned node (VLESS/VMess/SS/SSR/Trojan/TUIC/Hy2 as the
+     node's scheme requires),
+   - grouped under a sing-box `urltest` outbound for **latency-weighted
+     selection**.
+5. Passes the config to a new tunnel container (config file mount) and starts it.
+6. Returns `{host, port, username, password, id, granted_count, ...}`.
+
+The client connects to the tunnel port and sing-box exits through whichever
+assigned node currently answers fastest for each request. Assignment changes
+(swaps/additions) are rendered into a fresh config and the container is
+restarted automatically by the Engine — the client never sees a different
+host/port or credentials.
+
+```text
+client ──SOCKS5/HTTP──► tunnel:10244 ──urltest──► node A (fastest now)
+                                             └──► node B
+                                             └──► node C … k nodes
+```
+
+### SQLite store
+
+A single SQLite file (default `infinity.db`) on a Docker volume persists:
+
+- **tunnels** — id, state, port, credentials, `node_count` requested/granted,
+  `auto_renew` flag, timestamps,
+- **node cache** — node URIs, source, last-seen, last latency, assignment.
+
+Raw scrape batches are ephemeral. On boot the Engine loads this state and
+**reconciles**: it adopts containers whose config still matches, and stops
+orphans it no longer has a row for. Node liveness is re-established by the
+filter loop within one cadence.
+
+## Request flow (end to end)
+
+```mermaid
+sequenceDiagram
+    participant App as SomeApp
+    participant API as Engine control API (:8000)
+    participant E as Engine core
+    participant P as Node pool
+    participant S as sing-box container
+
+    App->>API: POST /tunnels {node_count:10, auto_renew:true}
+    API->>E: create_tunnel(...)
+    E->>E: pick free port (10000-59999)
+    E->>P: reserve 10 alive, exclusive nodes
+    alt fewer than 10 available
+        P-->>E: 6 nodes
+        E->>E: degrade granted_count=6, top-up later
+    end
+    E->>E: generate stable credentials
+    E->>E: render sing-box config (socks+http, urltest outbounds)
+    E->>S: write config volume, start container
+    S-->>E: listening on :port
+    API-->>App: 201 {host, port, user, pass, id, granted_count}
+
+    Note over E,S: renewal loop every 30s / 2 strikes
+    E->>S: probe each assigned node
+    S-->>E: node B failed 2 checks
+    E->>P: swap in fresh alive node
+    E->>S: rewrite config, restart container
+
+    App->>API: DELETE /tunnels/{id}
+    E->>S: stop & remove container
+    E->>P: release nodes back to pool
+    API-->>App: 204
+```
+
+## Renewal loop (the "time" axis)
+
+- Each tunnel with `auto_renew=true` is health-checked every **30s**.
+- A node is probed with its own protocol handshake. After **2 consecutive
+  failures** the node is marked dead and swapped.
+- The swap draws from the node pool (preferring nodes already tested alive and,
+  where possible, not previously failed for this tunnel — see
+  [ROADMAP](../ROADMAP.md) for the stricter avoidance goals).
+- Sources refetch on their own cadence (5 min–6 h), so the pool constantly
+  replenishes with fresh candidates.
+
+Degraded tunnels (`granted_count < requested`) are topped up opportunistically
+on every health-check pass until they reach the requested count or the pool is
+genuinely starved.
+
+### Pool starvation
+
+If the pool cannot satisfy `node_count` at creation time, the tunnel is created
+with what is available:
+
+- `node_count_granted < node_count_requested` in the response,
+- `GET /tunnels` shows the delta,
+- the renewal loop treats it as a top-up target.
+
+The Engine never queues or blocks a create request on the pool.
+
+## Ports, addresses, and security boundary
+
+- Control API + dashboard: `127.0.0.1:8000`, **localhost-only, no auth in v1**.
+  See [ADR-0003](./adr/0003-localhost-control-api.md). Mind that your public
+  network is not published to Docker by default (see
+  [CONTRIBUTING.md](../CONTRIBUTING.md)).
+- Tunnels: one published port each, from `INFINITY_TUNNEL_RANGE`. Each tunnel
+  binds its port and authenticates clients with per-tunnel credentials.
+- Tunnel containers have **no** route to the Engine's control port; they only
+  receive their rendered config and dial outbound.
+
+## Planned repository layout
+
+When code lands, it will follow this layout (specified here because the docs
+are the spec):
+
+```text
+InfinityProxy/
+├── engine/                   # Flask control plane
+│   ├── app.py                #   API + dashboard routes
+│   ├── scraper/              #   per-source fetchers + parsers
+│   ├── filter/               #   liveness probing, batch logic
+│   ├── assigner.py           #   exclusive node allocation
+│   ├── tunnel/               #   sing-box config rendering + container control
+│   └── db.py                 #   SQLite access
+├── tunnel-image/             # Docker image wrapping sing-box for tunnels
+├── tests/                    # unit tests (parser, filter, assigner)
+├── docs/
+├── CONTEXT.md
+└── ...
+```
+
+## Decisions
+
+Relevant architecture decision records:
+
+- [0001 Per-tunnel sing-box containers](./adr/0001-per-tunnel-containers.md)
+- [0002 SQLite store](./adr/0002-sqlite-store.md)
+- [0003 Localhost control API](./adr/0003-localhost-control-api.md)
+- [0004 MIT with upstream attribution](./adr/0004-mit-and-attribution.md)
+- [0005 Latency-weighted rotation](./adr/0005-latency-weighted-rotation.md)
