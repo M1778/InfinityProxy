@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import base64
 import builtins
+import io
 import json
-import os
+import tarfile
 
 import pytest
 
@@ -264,9 +265,29 @@ class FakeContainer:
         self.stopped = False
         self.removed = False
         self.restarted = False
+        self.started = False
+        self.archives: list[tuple[str, dict[str, bytes]]] = []
+        self.stop_raise: Exception | None = None
+        self.put_archive_raise: Exception | None = None
+
+    def put_archive(self, destination: str, archive: bytes) -> None:
+        if self.put_archive_raise is not None:
+            raise self.put_archive_raise
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r") as tar:
+            contents = {
+                member.name: tar.extractfile(member).read()
+                for member in tar.getmembers()
+                if member.isfile()
+            }
+        self.archives.append((destination, contents))
+
+    def start(self) -> None:
+        self.started = True
 
     def stop(self) -> None:
         self.stopped = True
+        if self.stop_raise is not None:
+            raise self.stop_raise
 
     def remove(self, force: bool = False) -> None:
         self.removed = True
@@ -276,16 +297,23 @@ class FakeContainer:
         self.restarted = True
 
 
+class StopAlready(Exception):
+    """Stand-in for docker's 304 `container already stopped` APIError."""
+
+
 class FakeContainers:
     def __init__(self) -> None:
         self.registry: dict[str, FakeContainer] = {}
-        self.run_calls: list[dict] = []
+        self.create_calls: list[dict] = []
+        self.fail_on_put: dict[str, Exception] = {}
 
-    def run(
+    def create(
         self, image: str, name: str | None = None, **kwargs: object
     ) -> FakeContainer:
-        self.run_calls.append({"image": image, "name": name, **kwargs})
+        self.create_calls.append({"image": image, "name": name, **kwargs})
         container = FakeContainer(name, self.registry)
+        if name in self.fail_on_put:
+            container.put_archive_raise = self.fail_on_put[name]
         self.registry[name] = container
         return container
 
@@ -312,28 +340,40 @@ class FakeDocker:
 SETTINGS = Settings()
 
 
-def config_path_of(run_call: dict) -> str:
-    return next(iter(run_call["volumes"]))
+def archived_config_of(container: FakeContainer) -> dict:
+    return json.loads(container.archives[-1][1]["sing-box/config.json"])
 
 
-def test_start_runs_container_with_expected_parameters() -> None:
+def test_start_creates_container_shipping_config_via_put_archive() -> None:
     fake = FakeDocker()
     controller = ContainerController(SETTINGS, docker_client=fake)
     config = {"log": {"level": "warn"}}
 
     controller.start(make_tunnel("tu_1"), config)
 
-    assert len(fake.containers.run_calls) == 1
-    call = fake.containers.run_calls[0]
+    assert len(fake.containers.create_calls) == 1
+    call = fake.containers.create_calls[0]
     assert call["name"] == "infinity-tu_1"
     assert call["image"] == SETTINGS.singbox_image
     assert call["network_mode"] == "host"
-    assert call["detach"] is True
+    assert call["command"] == ["run", "-c", "/etc/sing-box/config.json"]
     assert call["restart_policy"] == {"Name": "always"}
-    mount = call["volumes"][config_path_of(call)]
-    assert mount == {"bind": "/etc/sing-box/config.json", "mode": "ro"}
-    with open(config_path_of(call), encoding="utf-8") as fh:
-        assert json.load(fh) == config
+    assert "volumes" not in call
+    container = fake.containers.get("infinity-tu_1")
+    assert container.started is True
+    assert container.archives[0][0] == "/etc/"
+    assert archived_config_of(container) == config
+
+
+def test_start_removes_partial_container_when_shipment_fails() -> None:
+    fake = FakeDocker()
+    fake.containers.fail_on_put["infinity-tu_2"] = RuntimeError("config dir missing")
+    controller = ContainerController(SETTINGS, docker_client=fake)
+
+    with pytest.raises(RuntimeError, match="config dir missing"):
+        controller.start(make_tunnel("tu_2"), {"log": {"level": "warn"}})
+
+    assert "infinity-tu_2" not in fake.containers.registry
 
 
 def test_update_replaces_container_with_new_config() -> None:
@@ -343,18 +383,13 @@ def test_update_replaces_container_with_new_config() -> None:
     new_config = {"log": {"level": "debug"}}
 
     controller.start(make_tunnel("tu_2"), old_config)
-    old_path = config_path_of(fake.containers.run_calls[0])
     controller.update("tu_2", new_config)
 
-    assert len(fake.containers.run_calls) == 2
-    assert fake.containers.run_calls[1]["name"] == "infinity-tu_2"
+    assert len(fake.containers.create_calls) == 2
+    assert fake.containers.create_calls[1]["name"] == "infinity-tu_2"
     updated = fake.containers.get("infinity-tu_2")
-    with open(config_path_of(fake.containers.run_calls[1]), encoding="utf-8") as fh:
-        assert json.load(fh) == new_config
-    assert config_path_of(fake.containers.run_calls[1]) != old_path
-    assert os.path.exists(old_path) is False
-    assert os.path.exists(config_path_of(fake.containers.run_calls[1])) is True
-    assert updated.removed is False
+    assert updated.started is True
+    assert archived_config_of(updated) == new_config
 
 
 def test_stop_stops_and_removes_container() -> None:
@@ -362,13 +397,11 @@ def test_stop_stops_and_removes_container() -> None:
     controller = ContainerController(SETTINGS, docker_client=fake)
     controller.start(make_tunnel("tu_3"), {"log": {"level": "warn"}})
     container = fake.containers.get("infinity-tu_3")
-    path = config_path_of(fake.containers.run_calls[0])
 
     controller.stop("tu_3")
 
     assert container.stopped is True
     assert container.removed is True
-    assert os.path.exists(path) is False
     with pytest.raises(KeyError):
         fake.containers.get("infinity-tu_3")
 
@@ -377,6 +410,19 @@ def test_stop_unknown_tunnel_is_a_noop() -> None:
     fake = FakeDocker()
     controller = ContainerController(SETTINGS, docker_client=fake)
     controller.stop("never-started")  # must not raise
+
+
+def test_stop_tolerates_already_stopped_304_error() -> None:
+    fake = FakeDocker()
+    controller = ContainerController(SETTINGS, docker_client=fake)
+    controller.start(make_tunnel("tu_4"), {"log": {"level": "warn"}})
+    container = fake.containers.get("infinity-tu_4")
+    container.stop_raise = StopAlready("container already stopped")
+
+    controller.stop("tu_4")
+
+    assert container.removed is True
+    assert "infinity-tu_4" not in fake.containers.registry
 
 
 def test_restart_restarts_existing_container() -> None:

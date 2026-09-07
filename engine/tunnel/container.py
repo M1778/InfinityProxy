@@ -1,15 +1,16 @@
 """Per-tunnel sing-box container control (ADR-0001).
 
-Each tunnel is one sing-box container on the host network with a read-only
-mount of its rendered config, restarted as a whole when the config changes.
+Each tunnel is one sing-box container on the host network. The config is copied
+into the container as an in-memory tar, never bind-mounted: the Docker daemon
+resolves bind-mount sources on its own host, so a mount breaks whenever the
+engine itself runs inside a container.
 """
 
 from __future__ import annotations
 
+import io
 import json as _json
-import os
-import shutil
-import tempfile
+import tarfile
 from typing import Any
 
 from engine.config import Settings
@@ -33,7 +34,6 @@ class ContainerController:
     def __init__(self, settings: Settings, docker_client: Any | None = None) -> None:
         self._settings = settings
         self._docker_client = docker_client
-        self._config_paths: dict[str, str] = {}
 
     @property
     def docker(self) -> Any:
@@ -95,22 +95,26 @@ class ContainerController:
 
     def _run(self, name: str, config: dict) -> None:
         client = self.docker
-        config_dir = tempfile.mkdtemp(prefix=f"{name}-")
-        config_path = os.path.join(config_dir, "config.json")
-        with open(config_path, "w", encoding="utf-8") as fh:
-            _json.dump(config, fh)
-        client.containers.run(
+        container = client.containers.create(
             self._settings.singbox_image,
             # The official image entrypoint is bare `sing-box`; `run` must be
             # given explicitly or the container just prints help and exits.
             command=["run", "-c", _CONFIG_MOUNT_TARGET],
             name=name,
             network_mode="host",
-            volumes={config_path: {"bind": _CONFIG_MOUNT_TARGET, "mode": "ro"}},
-            detach=True,
             restart_policy={"Name": "always"},
         )
-        self._config_paths[name] = config_path
+        try:
+            container.put_archive("/etc/", _config_tar(config))
+            container.start()
+        except BaseException:
+            # The container may have been created but never got a usable
+            # config; do not leave a half-rolled shell behind.
+            try:
+                container.remove(force=True)
+            except Exception:  # noqa: BLE001 - cleanup is best-effort
+                pass
+            raise
 
     def _remove(self, name: str) -> None:
         try:
@@ -118,10 +122,28 @@ class ContainerController:
         except (_ContainerNotFound, KeyError):
             container = None
         if container is not None:
-            # stop() is a no-op on an already-stopped container (304), which
-            # still lets remove() clear it up.
-            container.stop()
+            # stop() is best-effort: docker returns a 304 for an already-stopped
+            # container and may hiccup on a dying one, but remove() must still
+            # clear the container either way.
+            try:
+                container.stop()
+            except Exception:  # noqa: BLE001 - cleanup must proceed regardless
+                pass
             container.remove()
-        config_path = self._config_paths.pop(name, None)
-        if config_path:
-            shutil.rmtree(os.path.dirname(config_path), ignore_errors=True)
+
+
+def _config_tar(config: dict) -> bytes:
+    # The official sing-box image has no /etc/sing-box, and put_archive cannot
+    # create its target directory, so the archive carries a nested member and
+    # is extracted into /etc to create the path on the fly.
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w") as tar:
+        data = _json.dumps(config, indent=2).encode("utf-8")
+        directory = tarfile.TarInfo("sing-box/")
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o755
+        tar.addfile(directory)
+        info = tarfile.TarInfo("sing-box/config.json")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    return payload.getvalue()

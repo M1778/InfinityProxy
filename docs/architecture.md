@@ -59,12 +59,15 @@ A tunnel is created when a client calls `POST /tunnels`. The Engine:
 3. Generates credentials (`username`, `password`), **stable for the tunnel's
    lifetime** — renewals never change them.
 4. Renders a sing-box config:
-   - inbound `socks` + `http` listeners on the tunnel port with auth,
+   - one `mixed` inbound serving SOCKS5 and HTTP on the tunnel port with auth
+     (sing-box refuses two inbounds sharing a listen port),
    - one outbound per assigned node (VLESS/VMess/SS/SSR/Trojan/TUIC/Hy2 as the
      node's scheme requires),
    - grouped under a sing-box `urltest` outbound for **latency-weighted
      selection**.
-5. Passes the config to a new tunnel container (config file mount) and starts it.
+5. Ships the config into a new tunnel container as an in-memory tar (no bind
+   mount: the Docker daemon resolves mount sources on its own host, which breaks
+   when the engine itself is containerized) and starts it.
 6. Returns `{host, port, username, password, id, granted_count, ...}`.
 
 The client connects to the tunnel port and sing-box exits through whichever
