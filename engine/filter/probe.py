@@ -24,8 +24,11 @@ ws/gRPC VLESS upgrades (the peer is always probed over plain TCP/TLS).
 
 from __future__ import annotations
 
+import base64
+import binascii
 import dataclasses
 import hashlib
+import json as _json
 import os
 import re
 import socket
@@ -55,9 +58,12 @@ def probeable(node: Node) -> bool:
 
     WS/gRPC transports cannot: the probe speaks plain TCP/TLS, so a ws-fronted
     TLS server answers the header handshake and then closes — a false positive
-    documented in ADR-0006.
+    documented in ADR-0006. This holds for every protocol, not just the relay
+    ones: a ws-fronted vmess (base64 JSON payload, `net` field) passes the v1
+    raw hello and sing-box still dials it, so its honeypot 4xx reach the tunnel
+    at connect time.
     """
-    return node.protocol not in _RELAY_PROTOCOLS or _transport(node) in ("tcp", "")
+    return _transport(node) in ("tcp", "")
 
 
 def probe(node: Node, timeout_s: float) -> ProbeResult:
@@ -170,6 +176,22 @@ class _RelayConfig:
 
 def _transport(node: Node) -> str | None:
     u = urlparse(node.uri)
+    if node.protocol == "vmess":
+        # The vmess transport is not in the URI query: it lives inside the
+        # base64 JSON payload as `net`. Base64 payloads may contain '/', which
+        # urlparse would mangle, so strip the scheme and fragment by hand (the
+        # same trap the renderer documents). A `?` form (uuid@host?net=ws)
+        # puts it in the query like any other protocol.
+        body = node.uri.removeprefix("vmess://").partition("#")[0]
+        q = parse_qs(u.query)
+        if "@" not in body:
+            try:
+                payload = _json.loads(_b64decode(body))
+            except (ValueError, TypeError):
+                return None
+            net = payload.get("net") if isinstance(payload, dict) else None
+            return (net or "tcp").lower()
+        return (_first(q, "net") or "tcp").lower()
     return (_first(parse_qs(u.query), "type") or "tcp").lower()
 
 
@@ -261,3 +283,21 @@ def _latency_ms(started: float) -> int:
 def _first(q: dict[str, list[str]], key: str) -> str | None:
     values = q.get(key)
     return values[0] if values else None
+
+
+def _b64decode(data: str) -> str:
+    """Decode a base64 payload, tolerating URL-safe alphabets and missing padding.
+
+    Mirrors the renderer's decoder in engine/tunnel/config.py so the probe and
+    the sing-box config agree on what a vmess payload means.
+    """
+    if "%" in data:
+        data = unquote(data)
+    padded = data + "=" * (-len(data) % 4)
+    for alt in (None, b"-_"):
+        try:
+            raw = base64.b64decode(padded, altchars=alt, validate=False)
+            return raw.decode("utf-8")
+        except (binascii.Error, ValueError, UnicodeDecodeError):
+            continue
+    raise ValueError(f"invalid base64 payload {data[:16]!r}")

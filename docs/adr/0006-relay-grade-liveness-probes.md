@@ -27,7 +27,7 @@ not when any bytes come back.
 | VLESS | full relay round-trip over TCP or stdlib TLS | sends header + a `GET`; requires the `0x00 0x00` response header followed by a relayed 2xx/3xx `HTTP/x.y` status line |
 | Trojan | full relay round-trip over stdlib TLS | TLS is mandatory; sends header + a `GET`, requires the relayed bytes to be a 2xx/3xx `HTTP/x.y` status line |
 | Shadowsocks | **deferred** — keeps v1 gating | full AEAD client needs a verified implementation; uncertified |
-| VMess | **deferred** — keeps v1 gating | AEAD header (UUID keyed) singular; zero alive in the pool today |
+| VMess | **deferred** — keeps v1 gating | AEAD header (UUID keyed) singular; ws/grpc-transport payloads rejected, zero ws/grpc alive in the pool today |
 | TUIC, Hysteria2 | **deferred** — keeps v1 gating | QUIC-based; no stdlib probe |
 | SSR | not assignable regardless (ADR-0002 / sing-box ≥ 1.6) | — |
 
@@ -60,6 +60,13 @@ Trade-offs, intentionally accepted and visible in the docs:
   and then closes with `ws closed` — a false positive that assignment would
   otherwise certify. Only `type=tcp` (or an absent `type`) is relay-probeable.
   Benchmarked 0/74 across two ws-populated tunnels before this guard.
+  The gate covers **every protocol, v1-fallback included**: `_transport()`
+  reads the vless/trojan `?type=` and the vmess base64 payload's `net` field,
+  and `probeable()` returns false for a ws/grpc of either kind. Without the
+  vmess arm, a ws-fronted vmess slips past the raw-hello v1 check (it answers
+  a TCP hello), is certified alive, and its canned 4xx reach the tunnel at
+  connect time — 0/15 on 403s from a bench whose 10 assigned nodes were all
+  vmess-ws, indistinguishable from a dead pool at the report level.
 
 ## Consequences
 

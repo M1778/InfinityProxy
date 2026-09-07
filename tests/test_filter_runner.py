@@ -282,6 +282,35 @@ def test_probe_relay_rejects_ws_transport() -> None:
     assert result.error and "relay-probeable" in result.error
 
 
+def test_probe_vmess_url_form_rejects_ws_transport() -> None:
+    node = make_node("wsv2", 10001, "vmess")
+    node = replace(node, uri=node.uri + "?net=ws")
+    result = real_probe(node, timeout_s=1.0)
+    assert result.alive is False
+    assert "ws" in (result.error or "")
+    assert result.error and "relay-probeable" in result.error
+
+
+def test_probe_vmess_json_payload_rejects_ws_transport() -> None:
+    import base64
+    import json
+
+    payload = json.dumps(
+        {
+            "add": "127.0.0.1",
+            "port": 10001,
+            "id": FAKE_UUID,
+            "aid": 0,
+            "net": "ws",
+            "path": "/probe",
+        }
+    ).encode()
+    uri = "vmess://" + base64.urlsafe_b64encode(payload).decode().rstrip("=")
+    node = make_node("wsv3", 10001, "vmess")
+    node = replace(node, uri=uri)
+    assert not real_probe(node, timeout_s=1.0).alive
+
+
 def test_probe_vless_dead_on_http_responder() -> None:
     server = Responder(_HTTP_200)
     try:
