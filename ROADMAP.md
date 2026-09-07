@@ -48,6 +48,14 @@ nodes that answer TCP but never relay, with nothing downstream able to recover
 the tunnel. The health loop needs a container-level miss in the same change:
 today a crash-looping tunnel container is invisible to node probes.
 
+### Tunneled-failure attribution
+Make sing-box name the node that failed. ADR-0005 chose `url-test`, whose
+aggregate outbound hides the failing peer (`outbound/rotator`), so sing-box
+relay errors like `unknown version: 72` (an HTTP responder on the port) cannot
+be mapped to a node for demotion. A per-node outbound with dial-time fallback
+(`load-balance`, or `urltest` whose selection keeps a `FixURL`/`url` per node
+for logging) would let the engine demote nod-house relay failures directly.
+
 ### Smarter renew avoidance
 Make renewal strictly avoid re-picking nodes that recently failed for a tunnel,
 and prefer candidates whose source refreshed most recently. Harder version of

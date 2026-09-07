@@ -1,0 +1,58 @@
+InfinityProxy production benchmark report
+started: 2026-09-07T07:01:10.540102Z
+target:  https://api.ipify.org
+
+tunnels:         3 (requested 10 nodes each)
+duration:        1200s
+requests sent:   74
+requests ok:     0 (0.0%)
+latency p50/p90/p95/max: 0/0/0/0 ms
+
+per tunnel/mode:
+  tunnel       mode    ok/tot   p50ms  p95ms  maxms  errors
+  tu_03b3e2/http 0/12        0      0      0    12
+  tu_03b3e2/socks5 0/13        0      0      0    13
+  tu_50fb11/http 0/12        0      0      0    12
+  tu_50fb11/socks5 0/12        0      0      0    12
+  tu_52b2d0/http 0/13        0      0      0    13
+  tu_52b2d0/socks5 0/12        0      0      0    12
+
+degraded samples: 0/408
+
+exit IPs observed per tunnel (ip1|ip2 = rotated):
+  port 10003: http=None socks5=None
+  port 10004: http=None socks5=None
+  port 10005: http=None socks5=None
+
+sing-box ERROR/FATAL lines: 36
+  [infinity-tu_50fb11] 2026-09-07T07:02:45.807786650Z [31mERROR[0m[0019] [[38;5;106m2705091418[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:53126: http: authentication failed, no Proxy-Authorizatio
+  [infinity-tu_50fb11] 2026-09-07T07:04:02.408721283Z [31mERROR[0m[0096] [[38;5;192m263166974[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:55394: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_50fb11] 2026-09-07T07:05:39.964288216Z [31mERROR[0m[0193] [[38;5;68m4007327540[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:37856: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_50fb11] 2026-09-07T07:07:24.039869732Z [31mERROR[0m[0298] [[38;5;77m3551499837[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:43140: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_50fb11] 2026-09-07T07:09:09.661074624Z [31mERROR[0m[0403] [[38;5;112m1683431520[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:40886: http: authentication failed, no Proxy-Authorizatio
+  [infinity-tu_50fb11] 2026-09-07T07:10:55.370344919Z [31mERROR[0m[0509] [[38;5;86m1989449361[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:33004: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_50fb11] 2026-09-07T07:12:41.029481511Z [31mERROR[0m[0615] [[38;5;195m3486081715[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:43410: http: authentication failed, no Proxy-Authorizatio
+  [infinity-tu_50fb11] 2026-09-07T07:14:26.687917580Z [31mERROR[0m[0720] [[38;5;170m1977608346[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:45508: http: authentication failed, no Proxy-Authorizatio
+  [infinity-tu_50fb11] 2026-09-07T07:16:12.288693246Z [31mERROR[0m[0826] [[38;5;226m3684847324[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:38846: http: authentication failed, no Proxy-Authorizatio
+  [infinity-tu_50fb11] 2026-09-07T07:17:58.077208977Z [31mERROR[0m[0932] [[38;5;41m2326004976[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:51462: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_50fb11] 2026-09-07T07:19:43.815772558Z [31mERROR[0m[1037] [[38;5;28m1358184419[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:53290: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_03b3e2] 2026-09-07T07:02:01.290268404Z [31mERROR[0m[0050] [[38;5;136m4189876856[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:35736: http: authentication failed, no Proxy-Authorizatio
+  [infinity-tu_03b3e2] 2026-09-07T07:03:08.334680405Z [31mERROR[0m[0117] [[38;5;202m808165050[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:39140: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_03b3e2] 2026-09-07T07:04:34.065054755Z [31mERROR[0m[0203] [[38;5;221m3549128929[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:32878: http: authentication failed, no Proxy-Authorizatio
+  [infinity-tu_03b3e2] 2026-09-07T07:06:14.000900567Z [31mERROR[0m[0303] [[38;5;155m749793163[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:40380: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_03b3e2] 2026-09-07T07:07:59.209831706Z [31mERROR[0m[0408] [[38;5;225m608001233[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:51464: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_03b3e2] 2026-09-07T07:09:44.901047514Z [31mERROR[0m[0514] [[38;5;87m2188866375[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:59220: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_03b3e2] 2026-09-07T07:11:30.507581223Z [31mERROR[0m[0619] [[38;5;186m2450280749[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:59850: http: authentication failed, no Proxy-Authorizatio
+  [infinity-tu_03b3e2] 2026-09-07T07:13:16.273815178Z [31mERROR[0m[0725] [[38;5;84m4281858963[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:52760: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_03b3e2] 2026-09-07T07:15:01.787061806Z [31mERROR[0m[0830] [[38;5;187m948419243[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:37736: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_03b3e2] 2026-09-07T07:16:47.574215255Z [31mERROR[0m[0936] [[38;5;157m3573943437[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:57558: http: authentication failed, no Proxy-Authorizatio
+  [infinity-tu_03b3e2] 2026-09-07T07:18:33.288226647Z [31mERROR[0m[1042] [[38;5;193m725074609[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:37934: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_03b3e2] 2026-09-07T07:20:18.970625911Z [31mERROR[0m[1148] [[38;5;191m3568106792[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:45350: http: authentication failed, no Proxy-Authorizatio
+  [infinity-tu_52b2d0] 2026-09-07T07:01:17.567133778Z [31mERROR[0m[0006] [[38;5;203m385834171[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:49806: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_52b2d0] 2026-09-07T07:02:23.514003130Z [31mERROR[0m[0072] [[38;5;46m3644121118[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:34646: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_52b2d0] 2026-09-07T07:03:31.178785846Z [31mERROR[0m[0140] [[38;5;74m101068858[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:42574: http: authentication failed, no Proxy-Authorization 
+  [infinity-tu_52b2d0] 2026-09-07T07:05:06.498826847Z [31mERROR[0m[0235] [[38;5;214m230800838[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:34808: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_52b2d0] 2026-09-07T07:06:48.862968455Z [31mERROR[0m[0338] [[38;5;188m950029996[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:36512: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_52b2d0] 2026-09-07T07:08:34.402025121Z [31mERROR[0m[0443] [[38;5;71m1779872311[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:33334: http: authentication failed, no Proxy-Authorization
+  [infinity-tu_52b2d0] 2026-09-07T07:10:20.171316476Z [31mERROR[0m[0549] [[38;5;224m1526473694[0m 0ms] inbound/mixed[mixed-in]: process connection from 127.0.0.1:39636: http: authentication failed, no Proxy-Authorizatio
+  ... and 6 more

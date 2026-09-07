@@ -20,7 +20,6 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic, sleep
-from urllib.parse import quote_plus
 
 import requests
 import urllib3
@@ -105,9 +104,11 @@ class Bench:
         port = tunnel["port"]
         user = tunnel["username"]
         password = tunnel["password"]
-        auth = quote_plus(f"{user}:{password}")
+        # Credentials in the proxy URL must stay unencoded: requests 2.34.x fails
+        # to send Proxy-Authorization when the userinfo is percent-encoded, so
+        # sing-box would reject every HTTP request as unauthenticated.
+        auth = f"{user}:{password}"
         start = monotonic()
-
         proxy_url = (
             f"http://{auth}@127.0.0.1:{port}"
             if mode == "http"
