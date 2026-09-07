@@ -41,6 +41,38 @@ _URI_DEFAULT_PORT = {
     "hysteria2": 443,
 }
 
+# Ciphers sing-box v1.x accepts for shadowsocks outbounds. Corrupted feed data
+# often decodes to a "method" that is not on this list; rendering such a node
+# makes sing-box refuse to start (empirically: "unknown method"), so the
+# renderer must reject the node up front instead of poisoning the whole config.
+_SS_METHODS = frozenset(
+    {
+        "2022-blake3-aes-128-gcm",
+        "2022-blake3-aes-256-gcm",
+        "2022-blake3-chacha20-poly1305",
+        "aes-128-gcm",
+        "aes-192-gcm",
+        "aes-256-gcm",
+        "chacha20-ietf-poly1305",
+        "xchacha20-ietf-poly1305",
+        "aes-128-cfb",
+        "aes-192-cfb",
+        "aes-256-cfb",
+        "aes-128-ctr",
+        "aes-192-ctr",
+        "aes-256-ctr",
+        "camellia-128-cfb",
+        "camellia-192-cfb",
+        "camellia-256-cfb",
+        "chacha20-ietf",
+        "xchacha20",
+        "salsa20",
+        "rc4",
+        "rc4-md5",
+        "none",
+    }
+)
+
 
 def node_tag(node: Node) -> str:
     """Tag naming scheme: `n_` + the node's stable pool id."""
@@ -100,6 +132,11 @@ def _first(q: dict[str, list[str]], key: str) -> str | None:
 
 
 def _b64decode(data: str) -> str:
+    # Some feeds percent-encode the userinfo (which is plain base64), e.g.
+    # %56%50... instead of VPNCU.... Base64 never contains '%', so unquoting
+    # when present is safe and leaves '+' untouched.
+    if "%" in data:
+        data = unquote(data)
     padded = data + "=" * (-len(data) % 4)
     for alt in (None, b"-_"):
         try:
@@ -132,13 +169,32 @@ def _host_port(netloc: str, default_port: int | None = None) -> tuple[str, int]:
     return unquote(host), int(port)
 
 
+def _required_tls(q: dict[str, list[str]], node: Node, label: str) -> dict[str, Any]:
+    """TLS for a protocol sing-box cannot run in the clear (trojan/tuic/h2).
+
+    A missing server_name makes sing-box refuse the outbound ("TLS required"),
+    which would crash the whole tunnel, so such a node is rejected up front and
+    the pool's admission gate demotes it.
+    """
+    tls = _tls_from_query(q, require_tls=True)
+    if not tls or "server_name" not in tls:
+        raise ValueError(
+            f"node {node.node_id!r}: {label} needs a TLS server_name "
+            "(sni=... in the URI) to configure a sing-box outbound"
+        )
+    return tls
+
+
 def _tls_from_query(
     q: dict[str, list[str]], require_tls: bool
 ) -> dict[str, Any] | None:
     security = (_first(q, "security") or "").lower()
     if not require_tls and security not in ("tls", "reality", "xtls"):
         return None
-    tls: dict[str, Any] = {}
+    # sing-box TLS options need enabled=true for any outbound that must run
+    # over TLS; without it a hysteria2/tuic/trojan outbound aborts at startup
+    # with "TLS required" even when a server_name is present.
+    tls: dict[str, Any] = {"enabled": True}
     sni = _first(q, "sni") or _first(q, "serverName") or _first(q, "server_name")
     if sni:
         tls["server_name"] = unquote(sni)
@@ -340,12 +396,18 @@ def _build_shadowsocks(node: Node) -> dict[str, Any]:
             raise ValueError(f"node {node.node_id!r}: ss payload lacks userinfo")
         method, _, password = userinfo.partition(":")
     host, port = _host_port(authority, _URI_DEFAULT_PORT[node.protocol])
+    method = unquote(method)
+    if method not in _SS_METHODS:
+        raise ValueError(
+            f"node {node.node_id!r}: ss method {method!r} is not supported "
+            f"by sing-box; supported: {', '.join(sorted(_SS_METHODS))}"
+        )
     out: dict[str, Any] = {
         "type": _PROTOCOL_OUTBOUND_TYPE[node.protocol],
         "tag": node_tag(node),
         "server": host,
         "server_port": port,
-        "method": unquote(method),
+        "method": method,
         "password": unquote(password),
     }
     if plugin:
@@ -366,7 +428,7 @@ def _build_trojan(node: Node) -> dict[str, Any]:
         "server": host,
         "server_port": port,
         "password": unquote(u.username or ""),
-        "tls": _tls_from_query(q, require_tls=True) or {},
+        "tls": _required_tls(q, node, "trojan"),
     }
     transport = _transport_from_query(q)
     if transport:
@@ -393,7 +455,7 @@ def _build_tuic(node: Node) -> dict[str, Any]:
     udp_mode = _first(q, "udp_relay_mode") or _first(q, "udp-relay-mode")
     if udp_mode:
         out["udp_relay_mode"] = udp_mode
-    out["tls"] = _tls_from_query(q, require_tls=True) or {}
+    out["tls"] = _required_tls(q, node, "tuic")
     return out
 
 
@@ -410,7 +472,7 @@ def _build_hysteria2(node: Node) -> dict[str, Any]:
         "server": host,
         "server_port": port,
         "password": password,
-        "tls": _tls_from_query(q, require_tls=True) or {},
+        "tls": _required_tls(q, node, "hysteria2"),
     }
     obfs_type = _first(q, "obfs")
     if obfs_type:

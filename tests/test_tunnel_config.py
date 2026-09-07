@@ -158,6 +158,49 @@ def test_render_config_shape_and_inbounds() -> None:
     assert rotator["outbounds"] == tags
 
 
+def test_ss_percent_encoded_userinfo_decodes() -> None:
+    from urllib.parse import quote
+
+    userinfo = quote(base64.b64encode(b"aes-256-gcm:p%40ssword").decode(), safe="")
+    uri = f"ss://{userinfo}@ss.example.com:8443#pct"
+    node = make_node("nd_pct_ss", uri, "ss", "ss.example.com", 8443)
+    cfg = render_config(make_tunnel(), [node])
+    out = next(o for o in cfg["outbounds"] if o["type"] == "shadowsocks")
+    assert out["method"] == "aes-256-gcm"
+    assert out["password"] == "p@ssword"
+
+
+def test_ss_unknown_method_rejected() -> None:
+    bogus = base64.b64encode(b"definitely-not-a-cipher:secret").decode()
+    node = make_node(
+        "nd_bad_algo",
+        f"ss://{bogus}@ss.example.com:8388#a",
+        "ss",
+        "ss.example.com",
+        8388,
+    )
+    with pytest.raises(ValueError, match="method"):
+        render_config(make_tunnel(), [node])
+
+
+@pytest.mark.parametrize(
+    ("uri", "protocol"),
+    [
+        ("trojan://pw@trojan.example.com:443#no-tls", "trojan"),
+        (f"tuic://{TUIC_UUID}:pw@tuic.example.com:443#no-tls", "tuic"),
+        ("hysteria2://secret@hy2.example.com:443#no-tls", "hysteria2"),
+    ],
+)
+def test_tls_mandatory_protocols_require_server_name(uri: str, protocol: str) -> None:
+    from urllib.parse import urlparse
+
+    host = urlparse(uri).hostname or "example.com"
+    port = urlparse(uri).port or 443
+    node = make_node(f"nd_tls_{protocol}", uri, protocol, host, port)
+    with pytest.raises(ValueError, match="server_name"):
+        render_config(make_tunnel(), [node])
+
+
 def test_render_config_no_nodes_falls_back_to_block() -> None:
     cfg = render_config(make_tunnel(), [])
     placements = [o for o in cfg["outbounds"] if o["tag"] != ROTATOR_TAG]
@@ -227,6 +270,7 @@ def test_vless_reality_renders_tls_reality() -> None:
     node = make_node("vr", VLESS_URI, "vless", "vless.example.com", 443)
     outbound = outbound_by_tag(render_config(tunnel, [node]), "n_vr")
     assert outbound["flow"] == "xtls-rprx-vision"
+    assert outbound["tls"]["enabled"] is True
     assert outbound["tls"]["server_name"] == "www.example.com"
     assert outbound["tls"]["reality"]["enabled"] is True
     assert outbound["tls"]["reality"]["public_key"] == "testPublicKey"

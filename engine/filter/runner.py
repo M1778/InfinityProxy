@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from engine.models import Node, ProbeResult
@@ -15,6 +16,7 @@ def batch_probe(
     batch_size: int = 50,
     timeout_s: float = 4.0,
     max_workers: int | None = None,
+    on_batch: Callable[[dict[str, ProbeResult]], None] | None = None,
 ) -> dict[str, ProbeResult]:
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1")
@@ -28,6 +30,16 @@ def batch_probe(
             }
             for future, node_id in futures.items():
                 results[node_id] = future.result()
+        if on_batch is not None:
+            # Surface every batch's verdict as soon as it is known, so the
+            # store sees alive nodes incrementally instead of after the whole
+            # (potentially very large) pass completes.
+            partial = {
+                node_id: results[node_id]
+                for node in chunk
+                if (node_id := node.node_id) in results
+            }
+            on_batch(partial)
     return results
 
 

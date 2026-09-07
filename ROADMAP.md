@@ -40,6 +40,14 @@ without exposing other tenants' tunnels. Resolves the
 Move the read-only dashboard toward full tunnel management: create, delete,
 force-renew, and inspect node latency live from the browser.
 
+### Relay-grade liveness v2
+Real per-protocol relay handshakes replace the TCP-dial-plus-hello v1 probe.
+v1 admits any echoing port, and the first production benchmark
+([docs/benchmark.md](./docs/benchmark.md)) traced end-to-end requests dying on
+nodes that answer TCP but never relay, with nothing downstream able to recover
+the tunnel. The health loop needs a container-level miss in the same change:
+today a crash-looping tunnel container is invisible to node probes.
+
 ### Smarter renew avoidance
 Make renewal strictly avoid re-picking nodes that recently failed for a tunnel,
 and prefer candidates whose source refreshed most recently. Harder version of

@@ -129,6 +129,22 @@ def test_upsert_candidates_inserts_once_and_keeps_first_seen_source(
     assert len(store.load_nodes()) == 2
 
 
+def test_uri_change_resets_state_for_gate_rejudgement(store: Store) -> None:
+    store.upsert_candidates([make_candidate(source="a")])
+    node = store.load_nodes()[0]
+    result = ProbeResult(node.node_id, alive=True, latency_ms=1)
+    store.apply_probe_results({node.node_id: result})
+    assert store.load_nodes(state="alive") != []
+
+    # Same identity (server:port:user) re-ingested with a different URI must not
+    # keep its old "alive" verdict: the admission gate has to re-judge it.
+    store.upsert_candidates(
+        [make_candidate(source="a", uri="vless://abc@1.2.3.4:443?type=ws#y")]
+    )
+    assert store.load_nodes(state="alive") == []
+    assert len(store.load_nodes(state="untested")) == 1
+
+
 def test_load_node_filters(store: Store) -> None:
     store.upsert_candidates(
         [

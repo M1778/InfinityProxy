@@ -217,10 +217,14 @@ class Store:
                     existing["uri"] != candidate.uri
                     or existing["protocol"] != candidate.protocol
                 ):
-                    # Identity already known: refresh the mutable fields but keep
-                    # the first-seen source as the attribution record.
+                    # Identity already known: change the URI/protocol, keep the
+                    # first-seen source as attribution. A changed URI makes any
+                    # previous liveness verdict stale, so the node is sent back
+                    # to the admission gate (untested) rather than keeping a
+                    # possibly-garbage "alive" state.
                     self._conn.execute(
-                        "UPDATE nodes SET uri = ?, protocol = ? WHERE node_id = ?",
+                        "UPDATE nodes SET uri = ?, protocol = ?, state = 'untested' "
+                        "WHERE node_id = ?",
                         (candidate.uri, candidate.protocol, candidate.node_id),
                     )
             self._conn.commit()

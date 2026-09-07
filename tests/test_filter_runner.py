@@ -219,6 +219,28 @@ def test_batch_probe_empty_input() -> None:
     assert batch_probe([]) == {}
 
 
+def test_batch_probe_fires_on_batch_callback_per_chunk(monkeypatch) -> None:
+    echo = EchoServer()
+    batches: list[list[str]] = []
+
+    def recorder(chunk: dict[str, ProbeResult]) -> None:
+        batches.append(sorted(chunk))
+
+    try:
+        nodes = [make_node(f"nd_{i}", echo.port) for i in range(5)]
+        results = batch_probe(nodes, batch_size=2, timeout_s=0.5, on_batch=recorder)
+    finally:
+        echo.close()
+
+    assert len(batches) == 3
+    assert batches == [
+        ["nd_0", "nd_1"],
+        ["nd_2", "nd_3"],
+        ["nd_4"],
+    ]
+    assert set(results) == {f"nd_{i}" for i in range(5)}
+
+
 def test_batch_probe_rejects_nonpositive_batch_size() -> None:
     with pytest.raises(ValueError):
         batch_probe([make_node("nd_0", 9)], batch_size=0)

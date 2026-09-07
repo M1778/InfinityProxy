@@ -40,7 +40,8 @@ Public feeds ─────► │  Scraper loop ─► Node pool ─► Livene
 - **Node pool** — in-memory working set of nodes that passed the liveness
   filter, persisted as a cache in SQLite for warm starts.
 - **Liveness filter** — probes nodes with a real protocol handshake, batched and
-  time-boxed (default batch 50, 4s timeout).
+  time-boxed (default batch 50, 4s timeout). Verdicts are written to the store
+  batch-by-batch, so alive nodes surface while a full source pass still runs.
 - **Assigner** — hands each new tunnel an exclusive private set of alive nodes.
 - **Control API** — Flask REST endpoints on `127.0.0.1:8000` (see
   [docs/api.md](./api.md)).

@@ -92,6 +92,34 @@ def test_create_tunnel_validation(client):
     assert test.post("/tunnels", json={"node_count": "x"}).status_code == 400
 
 
+def test_create_tunnel_unrenderable_nodes_cleans_up(client):
+    from engine.models import NodeCandidate, ProbeResult
+
+    test, store, controller = client
+    store.upsert_candidates(
+        [
+            NodeCandidate(
+                uri="ss://07042893-9818-4e42-a3e9-2f9f1dc4f6a1@1.2.3.4:9000#z",
+                protocol="ss",
+                server="1.2.3.4",
+                port=9000,
+                user=None,
+                source="test",
+            )
+        ]
+    )
+    node = store.load_nodes(state="untested")[0]
+    store.apply_probe_results({node.node_id: ProbeResult(node.node_id, alive=True)})
+    assert store.pool_counts()["alive"] == 1
+
+    res = test.post("/tunnels", json={"node_count": 2})
+    assert res.status_code == 502
+    assert res.get_json()["error"]["code"] == "invalid_nodes"
+    assert store.pool_counts()["alive"] == 1
+    assert store.load_tunnels() == []
+    assert controller.started == []
+
+
 def test_list_tunnels_round_trip(client):
     test, store, _ = client
     created = test.post("/tunnels", json={"node_count": 3}).get_json()

@@ -66,7 +66,14 @@ def create_app(
             )
         except PortExhausted as exc:
             return err("port_exhausted", str(exc), 503)
-        config = render_config(tunnel, nodes)
+        try:
+            config = render_config(tunnel, nodes)
+        except ValueError as exc:
+            # A node set that sing-box cannot represent must never strand a
+            # half-created tunnel: release and roll it back, then report why.
+            assigner.release_tunnel(store, tunnel.tunnel_id)
+            store.delete_tunnel(tunnel.tunnel_id)
+            return err("invalid_nodes", str(exc), 502)
         try:
             controller.start(tunnel, config)
         except TunnelRuntimeUnavailable as exc:

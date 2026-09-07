@@ -58,8 +58,19 @@ confirms the node relays, not just that it answers a ping.
 
 - Candidates queue through the filter in batches of 50; each node has 4s to
   complete a handshake.
+- Every batch verdict is written to the store as soon as it completes, so
+  `alive` nodes surface incrementally while a large pass still runs — the pool
+  is never held back until the full queue drains.
 - A node that passes is `alive` and joins the pool (fresh nodes are re-probed on
   next source cadence — free nodes churn fast).
+- A node that the tunnel renderer cannot turn into a sing-box outbound (broken
+  or garbage URIs, a shadowsocks cipher sing-box does not implement, or a
+  TLS-only protocol such as trojan/tuic/hysteria2 without a `server_name`) is
+  demoted to `dead` at admission, never assigned: a live socket is not a usable
+  node, and an unsupported config detail makes sing-box refuse to start the
+  whole tunnel. A node whose raw URI changes after it was admitted loses its
+  verdict and is re-probed through the gate, and each source refresh re-sweeps
+  the alive set for newly-unrenderable strays.
 - A node that fails is `dead`, excluded from assignment, and re-probed when its
   source next refreshes it.
 - Tunnel-assigned nodes are re-checked every 30s; 2 consecutive failures mark
