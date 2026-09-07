@@ -62,8 +62,17 @@ that means:
   with `INFINITY_RELAY_TARGET_HOST` / `INFINITY_RELAY_TARGET_PORT`; a target that
   answers on accept (or to the probe GET) without needing a browser is required —
   sing-box only emits the VLESS ack after the target returns bytes.
-- **Shadowsocks, VMess, TUIC, Hysteria2** keep v1 gating (full AEAD/QUIC
-  clients are deferred); these are not relay-certified.
+- **Shadowsocks** — the pool's second protocol — is probe-relayed for SIP004 AEAD
+  ciphers: the probe derives the session subkey (HKDF-SHA1 over the password's
+  MD5-keyed EVP_BytesToKey master key), sends `[salt][AE len][tag][AE addr+GET]
+  [tag]`, and requires the server's own `[salt][AE chunk]` to decrypt into a
+  relayed 2xx/3xx status line. Validated against a live sing-box 1.11.6
+  `shadowsocks` inbound for `aes-256-gcm` and `chacha20-ietf-poly1305`. ss
+  methods outside the AEAD probe table — stream ciphers
+  (`aes-256-cfb`, `rc4-md5`, …), 2022-blake3, `plugin=` URIs — are rejected at
+  probe time, not v1-certified.
+- **VMess, TUIC, Hysteria2** keep v1 gating (full AEAD/QUIC clients are
+  deferred); these are not relay-certified.
 - **WS/gRPC-transport nodes are rejected, not attempted, for every protocol**:
   the probe is plain TCP/TLS and cannot complete a WebSocket/gRPC upgrade, and a
   ws-fronted TLS server (e.g. Cloudflare Workers) answers the header handshake

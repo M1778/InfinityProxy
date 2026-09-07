@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import os
 import socket
 import ssl
 import threading
@@ -10,6 +14,11 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import (
+    AESGCM,
+    ChaCha20Poly1305,
+)
 
 from engine.filter.probe import probe as real_probe
 from engine.filter.runner import batch_probe
@@ -213,6 +222,169 @@ class TrojanRelayEmulator:
         self.sock.close()
 
 
+def make_ss_node(
+    node_id: str,
+    port: int,
+    method: str = "chacha20-ietf-poly1305",
+    password: str = "probe-secret",
+    suffix: str = "",
+) -> Node:
+    cred = (
+        base64.urlsafe_b64encode(f"{method}:{password}".encode()).decode().rstrip("=")
+    )
+    uri = f"ss://{cred}@127.0.0.1:{port}{suffix}"
+    return Node(
+        node_id=node_id,
+        uri=uri,
+        protocol="ss",
+        server="127.0.0.1",
+        port=port,
+        user=password,
+        source="test",
+        first_seen_s=time.time(),
+    )
+
+
+# Shadowsocks SIP004 AEAD primitives. These are a second implementation of the
+# published wire format (RFC 5869 HKDF-SHA1 + sing-box shadowaead framing), kept
+# in the test on purpose: the emulator is an independent server-side counterpart
+# to engine/filter/probe.py, so an interop bug in either side fails these tests.
+_SS_AEAD = {
+    "aes-128-gcm": (16, 16, AESGCM),
+    "aes-256-gcm": (32, 32, AESGCM),
+    "chacha20-ietf-poly1305": (32, 32, ChaCha20Poly1305),
+}
+
+
+def _evp_master_key(password: bytes, size: int) -> bytes:
+    out = bytearray()
+    prev = b""
+    while len(out) < size:
+        prev = hashlib.md5(prev + password).digest()
+        out += prev
+    return bytes(out[:size])
+
+
+def _hkdf_sha1(master: bytes, salt: bytes, size: int) -> bytes:
+    prk = hmac.new(salt, master, hashlib.sha1).digest()
+    out = b""
+    block = b""
+    counter = 1
+    while len(out) < size:
+        block = hmac.new(
+            prk, block + b"ss-subkey" + bytes([counter]), hashlib.sha1
+        ).digest()
+        out += block
+        counter += 1
+    return out[:size]
+
+
+def _bump_nonce(nonce: bytearray) -> None:
+    for i in range(len(nonce)):
+        nonce[i] = (nonce[i] + 1) & 0xFF
+        if nonce[i]:
+            return
+
+
+def _recv_exact(conn: socket.socket, n: int) -> bytes:
+    total = bytearray()
+    while len(total) < n:
+        chunk = conn.recv(n - len(total))
+        if not chunk:
+            return bytes(total)
+        total += chunk
+    return bytes(total)
+
+
+class SsRelayEmulator:
+    """Answers a SIP004 AEAD ss client with a relayed target response.
+
+    The emulator plays the sing-box server role: it reads the client salt and
+    chunk, then replies with its own salt and a chunk of `payload`. Wrong
+    credentials or malformed frames make it close quietly, like a real server.
+    """
+
+    def __init__(
+        self,
+        method: str = "chacha20-ietf-poly1305",
+        password: str = "probe-secret",
+        payload: bytes = _HTTP_200,
+    ) -> None:
+        key_len, salt_len, aead = _SS_AEAD[method]
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port = self.sock.getsockname()[1]
+        self.method = method
+        self.password = password
+        self.key_len, self.salt_len, self._aead = key_len, salt_len, aead
+        self._payload = payload
+        self.last_target: tuple[bytes, int] | None = None
+        self._stop = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._relay, args=(conn,), daemon=True).start()
+
+    def _relay(self, conn: socket.socket) -> None:
+        try:
+            with conn:
+                salt = _recv_exact(conn, self.salt_len)
+                if len(salt) < self.salt_len:
+                    return
+                cipher = self._aead(
+                    _hkdf_sha1(
+                        _evp_master_key(self.password.encode(), self.key_len),
+                        salt,
+                        self.key_len,
+                    )
+                )
+                nonce = bytearray(12)
+                head = _recv_exact(conn, 2 + 16)
+                if len(head) < 2 + 16:
+                    return
+                length = int.from_bytes(cipher.decrypt(bytes(nonce), head, None), "big")
+                _bump_nonce(nonce)
+                if length == 0 or length > 0x3FFF:
+                    return
+                body = _recv_exact(conn, length + 16)
+                if len(body) < length + 16:
+                    return
+                decoded = cipher.decrypt(bytes(nonce), body, None)
+                if decoded[:1] == b"\x03" and len(decoded) >= 3:
+                    host_len = decoded[1]
+                    fqdn = decoded[2 : 2 + host_len]
+                    port = decoded[2 + host_len : 2 + host_len + 2]
+                    self.last_target = (fqdn, int.from_bytes(port, "big"))
+                resp_salt = os.urandom(self.salt_len)
+                resp = self._aead(
+                    _hkdf_sha1(
+                        _evp_master_key(self.password.encode(), self.key_len),
+                        resp_salt,
+                        self.key_len,
+                    )
+                )
+                nonce = bytearray(12)
+                framed = resp.encrypt(
+                    bytes(nonce), len(self._payload).to_bytes(2, "big"), None
+                )
+                _bump_nonce(nonce)
+                framed += resp.encrypt(bytes(nonce), self._payload, None)
+                conn.sendall(resp_salt + framed)
+        except InvalidTag:
+            pass
+        except OSError:
+            pass
+
+    def close(self) -> None:
+        self._stop.set()
+        self.sock.close()
+
+
 def _canned_nginx_400(payload: bytes) -> bytes:
     return payload + b"HTTP/1.1 400 Bad Request\r\nServer: nginx/1.25.2\r\n\r\n"
 
@@ -378,17 +550,141 @@ def test_probe_vless_dead_on_canned_http_400_responder() -> None:
     assert "HTTP" in (result.error or "")
 
 
+def test_probe_ss_alive_on_aead_relay_emulator() -> None:
+    server = SsRelayEmulator()
+    try:
+        result = real_probe(make_ss_node("rss", server.port), timeout_s=1.0)
+    finally:
+        server.close()
+    assert result.alive is True
+    assert result.error is None
+    assert server.last_target == (b"www.google.com", 80)
+
+
+def test_probe_ss_alive_aes_256_gcm_flow() -> None:
+    server = SsRelayEmulator(method="aes-256-gcm")
+    try:
+        result = real_probe(
+            make_ss_node("rssaes", server.port, "aes-256-gcm"), timeout_s=1.0
+        )
+    finally:
+        server.close()
+    assert result.alive is True
+    assert result.error is None
+
+
+def test_probe_ss_alive_on_legacy_uri_form() -> None:
+    server = SsRelayEmulator()
+    try:
+        legacy = (
+            base64.urlsafe_b64encode(
+                b"chacha20-ietf-poly1305:probe-secret@127.0.0.1:"
+                + str(server.port).encode()
+            )
+            .decode()
+            .rstrip("=")
+        )
+        node = Node(
+            node_id="leg",
+            uri=f"ss://{legacy}",
+            protocol="ss",
+            server="127.0.0.1",
+            port=server.port,
+            user="probe-secret",
+            source="test",
+            first_seen_s=time.time(),
+        )
+        result = real_probe(node, timeout_s=1.0)
+    finally:
+        server.close()
+    assert result.alive is True
+    assert result.error is None
+
+
+def test_probe_ss_dead_on_canned_http_400_responder() -> None:
+    # A peer that answers the AEAD handshake with its own canned HTTP error is a
+    # honeypot: it is not relaying to the requested target and must not certify.
+    server = SsRelayEmulator(payload=_canned_nginx_400(b""))
+    try:
+        result = real_probe(make_ss_node("hss", server.port), timeout_s=1.0)
+    finally:
+        server.close()
+    assert result.alive is False
+    assert "HTTP" in (result.error or "")
+
+
+def test_probe_ss_dead_on_wrong_password() -> None:
+    server = SsRelayEmulator(password="other-secret")
+    try:
+        result = real_probe(make_ss_node("wp", server.port), timeout_s=1.0)
+    finally:
+        server.close()
+    assert result.alive is False
+    assert result.error
+
+
+def test_probe_ss_dead_on_plain_http_responder() -> None:
+    server = Responder(_HTTP_200)
+    try:
+        result = real_probe(make_ss_node("httpss", server.port), timeout_s=1.0)
+    finally:
+        server.close()
+    assert result.alive is False
+
+
+def test_probe_ss_dead_on_echo_responder() -> None:
+    server = EchoServer()
+    try:
+        result = real_probe(make_ss_node("echoss", server.port), timeout_s=1.0)
+    finally:
+        server.close()
+    assert result.alive is False
+
+
+def test_probe_ss_rejects_stream_cipher() -> None:
+    result = real_probe(make_ss_node("stream", 10001, "aes-256-cfb"), timeout_s=1.0)
+    assert result.alive is False
+    assert "aes-256-cfb" in (result.error or "")
+    assert "relay-probeable" in (result.error or "")
+
+
+def test_probe_ss_rejects_2022_blake3_cipher() -> None:
+    result = real_probe(
+        make_ss_node("b3", 10001, "2022-blake3-aes-256-gcm"), timeout_s=1.0
+    )
+    assert result.alive is False
+    assert "relay-probeable" in (result.error or "")
+
+
+def test_probe_ss_rejects_plugin() -> None:
+    result = real_probe(
+        make_ss_node("plug", 10001, suffix="?plugin=obfs-local"), timeout_s=1.0
+    )
+    assert result.alive is False
+    assert "plugin" in (result.error or "")
+
+
+def test_probe_ss_rejects_garble_uri() -> None:
+    node = make_ss_node("baduri", 10001)
+    node = replace(node, uri="ss://not-a-real-uri")
+    result = real_probe(node, timeout_s=1.0)
+    assert result.alive is False
+    assert "cannot parse" in (result.error or "")
+
+
 def test_batch_probe_returns_a_result_for_every_node() -> None:
     vless = VlessRelayEmulator()
     silent = SilentServer()
     refused = RefusedPort()
     echo = EchoServer()
+    ss = SsRelayEmulator()
     try:
         nodes = [
             make_node("nd_live", vless.port, "vless"),
             make_node("nd_silent", silent.port, "vless"),
             make_node("nd_closed", refused.port, "trojan"),
             make_node("nd_plain", echo.port, "socks5"),
+            make_ss_node("nd_ss", ss.port),
         ]
         results = batch_probe(nodes, batch_size=3, timeout_s=0.3)
     finally:
@@ -396,10 +692,12 @@ def test_batch_probe_returns_a_result_for_every_node() -> None:
         silent.close()
         refused.close()
         echo.close()
-    assert set(results) == {"nd_live", "nd_silent", "nd_closed", "nd_plain"}
+        ss.close()
+    assert set(results) == {"nd_live", "nd_silent", "nd_closed", "nd_plain", "nd_ss"}
     assert all(isinstance(r, ProbeResult) for r in results.values())
     assert results["nd_live"].alive is True
     assert results["nd_plain"].alive is True
+    assert results["nd_ss"].alive is True
     assert results["nd_closed"].alive is False
     assert results["nd_closed"].error
     assert results["nd_silent"].alive is False

@@ -3,7 +3,7 @@
 v2 semantics: a node is alive only when the server itself completes its wire
 protocol against a probe request, never because it answered bytes. The TCP-plus-
 hello v1 check (which certified HTTP responders as proxies) is kept only for
-protocols whose full client is deferred: ss/vmess/tuic/hysteria2.
+protocols whose full client is deferred: vmess/tuic/hysteria2.
 
 Full relay checks:
 - VLESS over TCP or stdlib TLS: send a VLESS CONNECT header for a benign target,
@@ -11,6 +11,13 @@ Full relay checks:
   HTTP responders both fail: an HTTP reply's first byte is 0x48, not version 0.
 - Trojan over stdlib TLS: send the CRLF/CMD/ATYP/ADDR/PORT/CRLF header with the
   password's SHA224 hex payload, expect `\\r\\n`.
+- Shadowsocks (SIP004 AEAD ciphers): derive the session subkey with HKDF-SHA1
+  from the EVP_BytesToKey MD5 master key plus a random salt, send
+  `[salt][AE len][tag][AE addr+GET][tag]`, and require the server's own
+  `[salt][AE len][tag][AE relayed][tag]` to decrypt to a target 2xx/3xx status
+  line. Chunk nonce is a little-endian counter incremented per AEAD op, exactly
+  as sing-box's shadowaead framing. Stream ciphers and 2022-blake3 methods
+  cannot be relay-certified and are rejected at probe time.
 
 The relayed bytes themselves must be a plausible `HTTP/x.y 2xx/3xx` status line
 from the requested target. A peer that answers the CONNECT with its own canned
@@ -28,6 +35,7 @@ import base64
 import binascii
 import dataclasses
 import hashlib
+import hmac
 import json as _json
 import os
 import re
@@ -37,6 +45,9 @@ import time
 import uuid
 from urllib.parse import parse_qs, unquote, urlparse
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
+
 from engine.models import Node, ProbeResult
 
 _HELLO = b"\x16\x03\x01\x00\x20\x01\x00\x00\x1c\x03\x03" + b"\x00" * 28
@@ -44,13 +55,37 @@ _HELLO = b"\x16\x03\x01\x00\x20\x01\x00\x00\x1c\x03\x03" + b"\x00" * 28
 _RELAY_PROTOCOLS = frozenset(("vless", "trojan"))
 
 _V1_FALLBACK_PROTOCOLS = frozenset(
-    ("vmess", "ss", "tuic", "hysteria2", "socks5", "http", "ssr")
+    ("vmess", "tuic", "hysteria2", "socks5", "http", "ssr")
 )
 
 _PATH_TARGET = os.environ.get("INFINITY_RELAY_TARGET_HOST", "www.google.com").encode(
     "ascii"
 )
 _TARGET_PORT = int(os.environ.get("INFINITY_RELAY_TARGET_PORT", "80"))
+
+
+@dataclasses.dataclass(frozen=True)
+class _SSAEADSpec:
+    key_len: int
+    salt_len: int
+    nonce_len: int
+    aead: object  # a cryptography.hazmat AEAD cipher class
+
+
+# SIP004 AEAD ciphers as sing-box shadowaead defines them (key/salt/nonce sizes).
+# Anything not in this table (stream ciphers, 2022-blake3 methods, xchacha20-
+# ietf-poly1305) stays unprobeable: this probe can only complete the AEAD relay
+# round-trip with the AEAD ciphers cryptography exposes on the OpenSSL backend,
+# and un-tested methods would weaken live assignments exactly like ws/gRPC did.
+_SS_AEAD_SPECS = {
+    "aes-128-gcm": _SSAEADSpec(16, 16, 12, AESGCM),
+    "aes-192-gcm": _SSAEADSpec(24, 24, 12, AESGCM),
+    "aes-256-gcm": _SSAEADSpec(32, 32, 12, AESGCM),
+    "chacha20-ietf-poly1305": _SSAEADSpec(32, 32, 12, ChaCha20Poly1305),
+}
+
+_SS_TAG_LEN = 16
+_SS_MAX_PACKET_SIZE = 16 * 1024 - 1  # 0x3FFF, sing-box / SIP004
 
 
 def probeable(node: Node) -> bool:
@@ -62,7 +97,18 @@ def probeable(node: Node) -> bool:
     ones: a ws-fronted vmess (base64 JSON payload, `net` field) passes the v1
     raw hello and sing-box still dials it, so its honeypot 4xx reach the tunnel
     at connect time.
+
+    Shadowsocks is additionally gated on the URI: only SIP004 AEAD methods on a
+    plain TCP conn (no plugin) can be relay-certified. Stream ciphers and
+    2022-blake3 methods are rejected here, not v1-certified, so no dead-by-relay
+    ss node can reach assignment.
     """
+    if node.protocol == "ss":
+        try:
+            method, _password, plugin = _ss_params(node)
+        except ValueError:
+            return False
+        return plugin is None and method in _SS_AEAD_SPECS
     return _transport(node) in ("tcp", "")
 
 
@@ -75,13 +121,12 @@ def probe(node: Node, timeout_s: float) -> ProbeResult:
                 node_id=node.node_id,
                 alive=False,
                 latency_ms=_latency_ms(started),
-                error=(
-                    f"transport {_transport(node)!r} is not relay-probeable "
-                    "(only plain TCP/TLS can complete a relay round-trip)"
-                ),
+                error=_unprobeable_reason(node),
             )
         if node.protocol in _RELAY_PROTOCOLS:
             alive, error = _attempt_relay(node, deadline)
+        elif node.protocol == "ss":
+            alive, error = _attempt_ss_relay(node, deadline)
         else:
             alive, error = _attempt_v1(node, deadline)
     except OSError as exc:
@@ -245,6 +290,171 @@ def _trojan_challenge(node: Node, conf: _RelayConfig, host: bytes, port: int) ->
         + port.to_bytes(2, "big")
         + b"\x0d\x0a"
     )
+
+
+# -- ss (SIP004 AEAD) relay handshake ------------------------------------------
+#
+# Wire framing mirrors sing-box shadowaead exactly:
+#   client: random salt (keySaltLength), then chunks
+#   chunk:  [AEAD(2-byte BE length)][tag][AEAD(payload)][tag]
+#   subkey: HKDF-SHA1(master_key, salt, info="ss-subkey")
+#   master: EVP_BytesToKey(MD5) over the password, key-length bytes
+#   nonce:  little-endian counter, incremented after every AEAD op
+#   target: SOCKS5 ATYP (0x03 FQDN) + 1-byte length + host + 2-byte BE port
+
+
+def _unprobeable_reason(node: Node) -> str:
+    transport = _transport(node)
+    if transport not in ("tcp", ""):
+        return (
+            f"transport {transport!r} is not relay-probeable "
+            "(only plain TCP/TLS can complete a relay round-trip)"
+        )
+    if node.protocol == "ss":
+        try:
+            method, _password, plugin = _ss_params(node)
+        except ValueError:
+            return f"cannot parse ss URI {node.uri[:40]!r} for relay probing"
+        if plugin is not None:
+            return (
+                f"ss plugin {plugin!r} is not relay-probeable "
+                "(the AEAD client cannot speak the plugin)"
+            )
+        supported = ", ".join(sorted(_SS_AEAD_SPECS))
+        return (
+            f"ss method {method!r} is not relay-probeable (only {supported} "
+            "are SIP004 AEAD; stream and 2022-blake3 ciphers are not "
+            "relay-certified)"
+        )
+    return (
+        f"transport {transport!r} is not relay-probeable "
+        "(only plain TCP/TLS can complete a relay round-trip)"
+    )
+
+
+def _ss_params(node: Node) -> tuple[str, str, str | None]:
+    """Return (method, password, plugin) parsed from an ss:// URI.
+
+    Accepts the same SIP002 shapes the renderer does (engine/tunnel/config.py):
+    `method:password@host:port`, base64(`method:password`)@host:port, and the
+    legacy all-base64 `base64(method:password@host:port)` form. Raises ValueError
+    when there is no usable method:password pair.
+    """
+    body = node.uri.removeprefix("ss://").partition("#")[0]
+    body, _, query = body.partition("?")
+    query = unquote(query)
+    plugin = query[7:] if query.startswith("plugin=") else None
+    if "@" in body:
+        userinfo, _, _ = body.partition("@")
+        if ":" in userinfo:
+            method, _, password = userinfo.partition(":")
+        else:
+            method, _, password = _b64decode(userinfo).partition(":")
+    else:
+        decoded = _b64decode(body)
+        userinfo, _, _ = decoded.partition("@")
+        if not userinfo:
+            raise ValueError(f"node {node.node_id!r}: ss payload lacks userinfo")
+        method, _, password = userinfo.partition(":")
+    if not method or not password:
+        raise ValueError(f"node {node.node_id!r}: ss userinfo lacks method:password")
+    return unquote(method), unquote(password), plugin
+
+
+def _ss_master_key(password: bytes, key_len: int) -> bytes:
+    """EVP_BytesToKey(MD5) master key (sing-box's shadowaead `Key`).
+
+    D_1 = MD5(password); D_i = MD5(D_{i-1} | password), concatenated to key_len.
+    """
+    out = bytearray()
+    prev = b""
+    while len(out) < key_len:
+        prev = hashlib.md5(prev + password).digest()
+        out.extend(prev)
+    return bytes(out[:key_len])
+
+
+def _ss_subkey(master: bytes, salt: bytes, length: int) -> bytes:
+    """HKDF-SHA1 (RFC 5869) with info "ss-subkey", matching sing-box."""
+    prk = hmac.new(salt, master, hashlib.sha1).digest()
+    out = b""
+    block = b""
+    counter = 1
+    while len(out) < length:
+        block = hmac.new(
+            prk, block + b"ss-subkey" + bytes([counter]), hashlib.sha1
+        ).digest()
+        out += block
+        counter += 1
+    return out[:length]
+
+
+def _ss_inc_nonce(nonce: bytearray) -> None:
+    for i in range(len(nonce)):
+        nonce[i] = (nonce[i] + 1) & 0xFF
+        if nonce[i]:
+            return
+
+
+def _ss_addr_header() -> bytes:
+    return (
+        b"\x03"  # ATYP: FQDN (SOCKS5 serializer, sing-box default)
+        + bytes([len(_PATH_TARGET)])
+        + _PATH_TARGET
+        + _TARGET_PORT.to_bytes(2, "big")
+    )
+
+
+def _attempt_ss_relay(node: Node, deadline: float) -> tuple[bool, str | None]:
+    method, password, _plugin = _ss_params(node)
+    spec = _SS_AEAD_SPECS[method]  # probeable() already gated the method
+    master = _ss_master_key(password.encode("utf-8"), spec.key_len)
+    raw = socket.create_connection(
+        (node.server, node.port), timeout=_remaining(deadline)
+    )
+    with raw:
+        raw.settimeout(_remaining(deadline))
+        salt = os.urandom(spec.salt_len)
+        client = spec.aead(_ss_subkey(master, salt, spec.key_len))
+        payload = _ss_addr_header() + b"GET / HTTP/1.0\r\n\r\n"
+        nonce = bytearray(spec.nonce_len)
+        framed = client.encrypt(bytes(nonce), len(payload).to_bytes(2, "big"), None)
+        _ss_inc_nonce(nonce)
+        framed += client.encrypt(bytes(nonce), payload, None)
+        raw.sendall(salt + framed)
+
+        server_salt = _recvn(raw, spec.salt_len)
+        if len(server_salt) < spec.salt_len:
+            return False, (
+                "peer closed before its salt (wrong credentials or non-relay responder)"
+            )
+        server = spec.aead(_ss_subkey(master, server_salt, spec.key_len))
+        nonce = bytearray(spec.nonce_len)
+        try:
+            head = _recvn(raw, 2 + _SS_TAG_LEN)
+            if len(head) < 2 + _SS_TAG_LEN:
+                return False, "peer closed before a length chunk (non-relay responder)"
+            length = int.from_bytes(server.decrypt(bytes(nonce), head, None), "big")
+            _ss_inc_nonce(nonce)
+            if length == 0 or length > _SS_MAX_PACKET_SIZE:
+                return False, f"peer chunk length {length} out of range"
+            body = _recvn(raw, length + _SS_TAG_LEN)
+            if len(body) < length + _SS_TAG_LEN:
+                return False, "peer closed mid-chunk (non-relay responder)"
+            relayed = server.decrypt(bytes(nonce), body, None)
+        except InvalidTag:
+            return False, "decrypt failed (wrong credentials or non-relay responder)"
+    if payload.startswith(relayed):
+        return False, (
+            "server relayed our request bytes back (echo, non-relay responder)"
+        )
+    if not _is_successful_http(relayed):
+        status = _http_status(relayed)
+        return False, (
+            f"peer answered {relayed[:24]!r} (status {status or 'unknown'}), not "
+            "a relayed 2xx/3xx response from the target (canned-response honeypot)"
+        )
+    return True, None
 
 
 def _recvn(sock: socket.socket, n: int) -> bytes:

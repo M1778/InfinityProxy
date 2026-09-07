@@ -26,7 +26,7 @@ not when any bytes come back.
 | --- | --- | --- |
 | VLESS | full relay round-trip over TCP or stdlib TLS | sends header + a `GET`; requires the `0x00 0x00` response header followed by a relayed 2xx/3xx `HTTP/x.y` status line |
 | Trojan | full relay round-trip over stdlib TLS | TLS is mandatory; sends header + a `GET`, requires the relayed bytes to be a 2xx/3xx `HTTP/x.y` status line |
-| Shadowsocks | **deferred** — keeps v1 gating | full AEAD client needs a verified implementation; uncertified |
+| Shadowsocks | full relay round-trip over TCP (SIP004 AEAD) | derives the session subkey with HKDF-SHA1 over the password's EVP_BytesToKey master key; sends `[salt][AE len][tag][AE addr+GET][tag]`, requires the server's `[salt][AE chunk]` to decrypt into a relayed 2xx/3xx status line. AEAD-only: `aes-128/192/256-gcm`, `chacha20-ietf-poly1305` |
 | VMess | **deferred** — keeps v1 gating | AEAD header (UUID keyed) singular; ws/grpc-transport payloads rejected, zero ws/grpc alive in the pool today |
 | TUIC, Hysteria2 | **deferred** — keeps v1 gating | QUIC-based; no stdlib probe |
 | SSR | not assignable regardless (ADR-0002 / sing-box ≥ 1.6) | — |
@@ -54,6 +54,16 @@ Trade-offs, intentionally accepted and visible in the docs:
 - The status-line gate can false-negative a genuine relay whose target replies
   with a 4xx/5xx (the probe always `GET /`es a benign target, so this is rare);
   better a working node dropped than a honeypot certified.
+- **Unprobeable ss methods are dropped, not v1-certified.** Only the ciphers in
+  `_SS_AEAD_SPECS` can complete the relay handshake; stream ciphers
+  (`aes-256-cfb`, `rc4-md5`, …), the 2022-blake3 family, and plugin-transport
+  URIs (`plugin=`) are rejected at `probeable()`, exactly like ws/gRPC — better
+  a node dropped than a web server certified. `xchacha20-ietf-poly1305` is
+  likewise excluded: the `cryptography` AEAD surface on the deployed OpenSSL
+  backend does not expose it, and certifying a cipher the probe cannot test
+  would re-open the exact hole this ADR closes. The ss probe was validated
+  against a live sing-box 1.11.6 `shadowsocks` inbound (`aes-256-gcm` and
+  `chacha20-ietf-poly1305`); a wrong password is correctly reported dead.
 - **WS/gRPC-transport nodes are rejected at probe time**, not attempted: the
   probe is plain TCP/TLS and cannot complete a WebSocket/gRPC upgrade, so a
   ws-fronted TLS server (e.g. Cloudflare Workers) answers the trojan handshake
@@ -73,7 +83,9 @@ Trade-offs, intentionally accepted and visible in the docs:
 - The pool shrinks discontinuously on redeploy: previously-`alive` non-relays
   are re-probed and demoted; assignment counts fall and tunnels start degraded
   until genuinely relaying nodes arrive.
-- The engine's copy of `engine/filter/probe.py` now reads only stdlib
-  (`socket`, `ssl`, `hashlib`) — no new dependencies for the engine image.
+- The engine's copy of `engine/filter/probe.py` reads stdlib `socket`/`ssl`/
+  `hashlib` plus **`cryptography`** for the AEAD ciphers (`AESGCM`,
+  `ChaCha20Poly1305`, HKDF-SHA1) — a new engine-image dependency accepted by
+  this ADR in exchange for closing the ss v1-gating hole.
 - Health-check misses (30s cadence) keep their current semantics; v2 raises
   the bar at admission but does not change the renewal loop.
