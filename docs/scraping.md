@@ -64,8 +64,13 @@ that means:
   sing-box only emits the VLESS ack after the target returns bytes.
 - **Shadowsocks, VMess, TUIC, Hysteria2** keep v1 gating (full AEAD/QUIC
   clients are deferred); these are not relay-certified.
-- Reality-fronted VLESS and ws/gRPC VLESS can fail false-negative: the stdlib
-  probe cannot reproduce a browser TLS fingerprint or a WebSocket upgrade.
+- **WS/gRPC-transport nodes are rejected, not attempted**: the probe is plain
+  TCP/TLS and cannot complete a WebSocket/gRPC upgrade, and a ws-fronted TLS
+  server (e.g. Cloudflare Workers) answers the header handshake then closes —
+  measured 0/74 requests across two ws-populated tunnels before the guard.
+  Only `type=tcp` (or absent `type`) is relay-probeable. Reality-fronted VLESS
+  can still fail false-negative: the stdlib probe cannot reproduce a browser
+  TLS fingerprint.
 
 | Setting | Default |
 | --- | --- |

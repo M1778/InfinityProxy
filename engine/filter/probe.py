@@ -44,10 +44,30 @@ _PATH_TARGET = os.environ.get("INFINITY_RELAY_TARGET_HOST", "www.google.com").en
 _TARGET_PORT = int(os.environ.get("INFINITY_RELAY_TARGET_PORT", "80"))
 
 
+def probeable(node: Node) -> bool:
+    """True when the node can complete a relay round-trip under this probe.
+
+    WS/gRPC transports cannot: the probe speaks plain TCP/TLS, so a ws-fronted
+    TLS server answers the header handshake and then closes — a false positive
+    documented in ADR-0006.
+    """
+    return node.protocol not in _RELAY_PROTOCOLS or _transport(node) in ("tcp", "")
+
+
 def probe(node: Node, timeout_s: float) -> ProbeResult:
     started = time.monotonic()
     deadline = started + timeout_s
     try:
+        if not probeable(node):
+            return ProbeResult(
+                node_id=node.node_id,
+                alive=False,
+                latency_ms=_latency_ms(started),
+                error=(
+                    f"transport {_transport(node)!r} is not relay-probeable "
+                    "(only plain TCP/TLS can complete a relay round-trip)"
+                ),
+            )
         if node.protocol in _RELAY_PROTOCOLS:
             alive, error = _attempt_relay(node, deadline)
         else:
@@ -121,6 +141,11 @@ def _judge(node: Node, conn: socket.socket, sent: bytes) -> tuple[bool, str | No
 class _RelayConfig:
     tls: bool
     sni: str | None
+
+
+def _transport(node: Node) -> str | None:
+    u = urlparse(node.uri)
+    return (_first(parse_qs(u.query), "type") or "tcp").lower()
 
 
 def _relay_config(node: Node) -> _RelayConfig:

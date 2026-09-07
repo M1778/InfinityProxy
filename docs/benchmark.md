@@ -119,5 +119,8 @@ were updated in the same change.
   because node probes keep passing. The scheduler needs to also treat a
   non-running tunnel container as a health miss.
 - Free feeds are overwhelmingly stale or hostile (25,729 scraped → ~3,100
-  pass port-open liveness → 0/44 relayed within the window). Expect low success
-  rates from any pool regardless of engine correctness.
+  pass port-open liveness → 0/44 relayed within the window). Relay-grade
+  abduction still certifies sparsley: a 20-minute window over a v2-certified
+  pool relayed 42/444 total, and 0/74 across two ws-transport-populated
+  tunnels (the ws guard in ADR-0006 now rejects those at probe time). Expect
+  low success rates from any pool regardless of engine correctness.

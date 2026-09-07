@@ -11,6 +11,7 @@ from dataclasses import replace
 
 from engine.config import Settings
 from engine.db import Store
+from engine.filter.probe import probeable
 from engine.filter.runner import batch_probe
 from engine.models import ProbeResult, SourceManifest
 from engine.scraper import SOURCES, dedup, fetch_text, parse_feed
@@ -75,6 +76,8 @@ def demote_unrenderable(store: Store) -> int:
     for node in store.load_nodes(state="alive"):
         try:
             _outbound_from_node(node)
+            if not probeable(node):
+                raise ValueError("node transport is not relay-probeable")
         except Exception:  # noqa: BLE001 - one bad node must not abort the sweep
             store.apply_probe_results(
                 {

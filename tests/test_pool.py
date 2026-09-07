@@ -144,3 +144,35 @@ def test_demote_unrenderable_sweeps_alive_garbage() -> None:
         assert demoted == 1
         assert store.pool_counts()["alive"] == 1
         assert store.pool_counts()["dead"] == 1
+
+
+def test_demote_sweep_rejects_ws_transport_alive() -> None:
+    from engine.models import NodeCandidate
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = Store(str(Path(tmp) / "t.db"))
+        store.create_schema()
+        store.upsert_candidates(
+            [
+                NodeCandidate(
+                    uri=(
+                        "trojan://pw@127.0.0.1:443?security=tls&sni=example.com&type=ws"
+                    ),
+                    protocol="trojan",
+                    server="127.0.0.1",
+                    port=443,
+                    user="pw",
+                    source="test",
+                )
+            ]
+        )
+        alive = {
+            n.node_id: ProbeResult(n.node_id, alive=True) for n in store.load_nodes()
+        }
+        store.apply_probe_results(alive)
+        assert store.pool_counts()["alive"] == 1
+
+        demoted = demote_unrenderable(store)
+        assert demoted == 1
+        assert store.pool_counts()["alive"] == 0
+        assert store.pool_counts()["dead"] == 1

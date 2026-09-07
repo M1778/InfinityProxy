@@ -6,6 +6,7 @@ import socket
 import ssl
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -261,6 +262,19 @@ def test_probe_vless_alive_on_relay_emulator() -> None:
         server.close()
     assert result.alive is True
     assert result.error is None
+
+
+def test_probe_relay_rejects_ws_transport() -> None:
+    server = VlessRelayEmulator()
+    try:
+        node = make_node("wsv", server.port, "vless")
+        node = replace(node, uri=node.uri + "?type=ws")
+        result = real_probe(node, timeout_s=1.0)
+    finally:
+        server.close()
+    assert result.alive is False
+    assert "ws" in (result.error or "")
+    assert result.error and "relay-probeable" in result.error
 
 
 def test_probe_vless_dead_on_http_responder() -> None:

@@ -37,12 +37,15 @@ Trade-offs, intentionally accepted and visible in the docs:
   with a browser TLS fingerprint; a stdlib ClientHello is not one, so genuine
   reality nodes can be classified dead. Better a node dropped than a web server
   certified; the first benchmark observed zero working relays anyway.
-- **WS/gRPC VLESS transports** are probed as plain TCP/TLS, not upgraded. A
-  real ws server (which we have never observed relaying) may be dropped; every
-  HTTP responder keeps being rejected, which is the failure class that exists.
 - Requiring the full relay round-trip (header ack + foreign bytes) kills both
   "echo" certifiers — a listener that merely answers back the bytes it received —
   and HTTP responders, which v1 could not distinguish.
+- **WS/gRPC-transport nodes are rejected at probe time**, not attempted: the
+  probe is plain TCP/TLS and cannot complete a WebSocket/gRPC upgrade, so a
+  ws-fronted TLS server (e.g. Cloudflare Workers) answers the trojan handshake
+  and then closes with `ws closed` — a false positive that assignment would
+  otherwise certify. Only `type=tcp` (or an absent `type`) is relay-probeable.
+  Benchmarked 0/74 across two ws-populated tunnels before this guard.
 
 ## Consequences
 
