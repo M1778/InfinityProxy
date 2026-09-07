@@ -71,19 +71,24 @@ that means:
   methods outside the AEAD probe table — stream ciphers
   (`aes-256-cfb`, `rc4-md5`, …), 2022-blake3, `plugin=` URIs — are rejected at
   probe time, not v1-certified.
-- **VMess, TUIC, Hysteria2** keep v1 gating (full AEAD/QUIC clients are
-  deferred); these are not relay-certified.
+- **HTTP and SOCKS5 forward proxies** are probe-relayed too: the probe completes
+  a `CONNECT`/SOCKS5 handshake to the target and then requires the relayed target
+  response to be a 2xx/3xx `HTTP/x.y` line (validated against live sing-box
+  `socks`/`http` inbounds). A proxy that grants CONNECT but answers with its own
+  canned HTTP error is a honeypot and is rejected.
+- **VMess, TUIC, Hysteria2** have no relay probe (the full AEAD client is
+  deferred; the QUIC clients are out of reach for a TCP probe) and are **not
+  certified at all**: there is no TCP-hello v1 fallback, so these never reach
+  the pool as alive.
 - **WS/gRPC-transport nodes are rejected, not attempted, for every protocol**:
   the probe is plain TCP/TLS and cannot complete a WebSocket/gRPC upgrade, and a
   ws-fronted TLS server (e.g. Cloudflare Workers) answers the header handshake
   then closes — measured 0/74 requests across two ws-populated tunnels before
   the guard. The gate reads the transport from `?type=` for vless/trojan and
-  from the vmess base64 payload's `net` field (a ws `net` otherwise passes the
-  v1 raw-hello check, gets certified alive, and its canned 4xx reach the tunnel
-  at connect time: 0/15 on a bench whose 10 nodes were all vmess-ws). Only
-  `type=tcp` (or absent `type`, or vmess payload `net=tcp/absent`) is
-  probeable. Reality-fronted VLESS can still fail false-negative: the stdlib
-  probe cannot reproduce a browser TLS fingerprint.
+  from the vmess base64 payload's `net` field. Only `type=tcp` (or absent
+  `type`, or vmess payload `net=tcp/absent`) is probeable. Reality-fronted
+  VLESS can still fail false-negative: the stdlib probe cannot reproduce a
+  browser TLS fingerprint.
 
 | Setting | Default |
 | --- | --- |

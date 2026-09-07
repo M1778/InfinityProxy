@@ -385,6 +385,103 @@ class SsRelayEmulator:
         self.sock.close()
 
 
+def _read_until(conn: socket.socket, sentinel: bytes) -> bytes:
+    buf = bytearray()
+    while not buf.endswith(sentinel):
+        chunk = conn.recv(256)
+        if not chunk:
+            break
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+class HttpRelayEmulator:
+    """Answers an HTTP CONNECT with 200, then relays a canned target response."""
+
+    def __init__(self, payload: bytes = _HTTP_200) -> None:
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port = self.sock.getsockname()[1]
+        self._payload = payload
+        self.last_target: bytes | None = None
+        self._stop = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._relay, args=(conn,), daemon=True).start()
+
+    def _relay(self, conn: socket.socket) -> None:
+        with conn:
+            try:
+                request = _read_until(conn, b"\r\n\r\n")
+                if not request.startswith(b"CONNECT "):
+                    return
+                self.last_target = request.split(b"\r\n", 1)[0]
+                conn.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                if conn.recv(64):  # the GET through the tunnel
+                    conn.sendall(self._payload)
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        self._stop.set()
+        self.sock.close()
+
+
+class Socks5RelayEmulator:
+    """Answers SOCKS5 negotiation + CONNECT, then relays a canned response."""
+
+    def __init__(self, payload: bytes = _HTTP_200, grant: bytes | None = None) -> None:
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port = self.sock.getsockname()[1]
+        self._payload = payload
+        self._grant = grant or b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+        self.last_target: tuple[bytes, int] | None = None
+        self._stop = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._relay, args=(conn,), daemon=True).start()
+
+    def _relay(self, conn: socket.socket) -> None:
+        with conn:
+            try:
+                if conn.recv(3)[:1] != b"\x05":
+                    return
+                conn.sendall(b"\x05\x00")
+                head = _recv_exact(conn, 4)
+                if len(head) < 4 or head[3] != 0x03:
+                    return
+                host_len = _recv_exact(conn, 1)
+                if not host_len:
+                    return
+                host = _recv_exact(conn, host_len[0])
+                port = _recv_exact(conn, 2)
+                if len(port) < 2:
+                    return
+                self.last_target = (host, int.from_bytes(port, "big"))
+                conn.sendall(self._grant)
+                if conn.recv(64):  # the GET through the tunnel
+                    conn.sendall(self._payload)
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        self._stop.set()
+        self.sock.close()
+
+
 def _canned_nginx_400(payload: bytes) -> bytes:
     return payload + b"HTTP/1.1 400 Bad Request\r\nServer: nginx/1.25.2\r\n\r\n"
 
@@ -399,14 +496,83 @@ def test_probe_vless_dead_on_echo_responder() -> None:
     assert result.latency_ms is not None
 
 
-def test_probe_alive_on_plain_listener() -> None:
-    server = EchoServer()
+def test_probe_http_alive_on_relay_emulator() -> None:
+    server = HttpRelayEmulator()
     try:
-        result = real_probe(make_node("plain", server.port, "http"), timeout_s=1.0)
+        result = real_probe(make_node("ph", server.port, "http"), timeout_s=1.0)
     finally:
         server.close()
     assert result.alive is True
     assert result.error is None
+    assert server.last_target is not None
+    assert b"www.google.com:80" in server.last_target
+
+
+def test_probe_http_dead_on_echo_responder() -> None:
+    server = EchoServer()
+    try:
+        result = real_probe(make_node("eh", server.port, "http"), timeout_s=1.0)
+    finally:
+        server.close()
+    assert result.alive is False
+
+
+def test_probe_http_dead_on_canned_400_after_connect() -> None:
+    # The proxy grants CONNECT but answers the tunneled GET with its own 400:
+    # not a target response, so the honeypot must not certify.
+    server = HttpRelayEmulator(payload=_canned_nginx_400(b""))
+    try:
+        result = real_probe(make_node("rh", server.port, "http"), timeout_s=1.0)
+    finally:
+        server.close()
+    assert result.alive is False
+    assert "HTTP" in (result.error or "")
+
+
+def test_probe_socks5_alive_on_relay_emulator() -> None:
+    server = Socks5RelayEmulator()
+    try:
+        result = real_probe(make_node("ps", server.port, "socks5"), timeout_s=1.0)
+    finally:
+        server.close()
+    assert result.alive is True
+    assert result.error is None
+    assert server.last_target == (b"www.google.com", 80)
+
+
+def test_probe_socks5_dead_on_echo_responder() -> None:
+    server = EchoServer()
+    try:
+        result = real_probe(make_node("es", server.port, "socks5"), timeout_s=1.0)
+    finally:
+        server.close()
+    assert result.alive is False
+
+
+def test_probe_socks5_dead_on_grant_refusal() -> None:
+    # RFC 1928 CONNECT failure reply (VER REP, code 0x01 general failure).
+    server = Socks5RelayEmulator(grant=b"\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00")
+    try:
+        result = real_probe(make_node("gs", server.port, "socks5"), timeout_s=1.0)
+    finally:
+        server.close()
+    assert result.alive is False
+    assert "CONNECT grant" in (result.error or "")
+
+
+def test_probe_vmess_demoted_without_relay_client() -> None:
+    node = make_node("vm", 10001, "vmess")
+    result = real_probe(node, timeout_s=1.0)
+    assert result.alive is False
+    assert "relay-probeable" in (result.error or "")
+
+
+def test_probe_tuic_and_hysteria2_demoted_without_relay_client() -> None:
+    for proto in ("tuic", "hysteria2"):
+        node = make_node(proto, 10001, proto)
+        result = real_probe(node, timeout_s=1.0)
+        assert result.alive is False
+        assert "relay-probeable" in (result.error or "")
 
 
 def test_probe_dead_on_closed_port() -> None:
@@ -676,14 +842,14 @@ def test_batch_probe_returns_a_result_for_every_node() -> None:
     vless = VlessRelayEmulator()
     silent = SilentServer()
     refused = RefusedPort()
-    echo = EchoServer()
+    socks5 = Socks5RelayEmulator()
     ss = SsRelayEmulator()
     try:
         nodes = [
             make_node("nd_live", vless.port, "vless"),
             make_node("nd_silent", silent.port, "vless"),
             make_node("nd_closed", refused.port, "trojan"),
-            make_node("nd_plain", echo.port, "socks5"),
+            make_node("nd_plain", socks5.port, "socks5"),
             make_ss_node("nd_ss", ss.port),
         ]
         results = batch_probe(nodes, batch_size=3, timeout_s=0.3)
@@ -691,7 +857,7 @@ def test_batch_probe_returns_a_result_for_every_node() -> None:
         vless.close()
         silent.close()
         refused.close()
-        echo.close()
+        socks5.close()
         ss.close()
     assert set(results) == {"nd_live", "nd_silent", "nd_closed", "nd_plain", "nd_ss"}
     assert all(isinstance(r, ProbeResult) for r in results.values())

@@ -27,9 +27,11 @@ not when any bytes come back.
 | VLESS | full relay round-trip over TCP or stdlib TLS | sends header + a `GET`; requires the `0x00 0x00` response header followed by a relayed 2xx/3xx `HTTP/x.y` status line |
 | Trojan | full relay round-trip over stdlib TLS | TLS is mandatory; sends header + a `GET`, requires the relayed bytes to be a 2xx/3xx `HTTP/x.y` status line |
 | Shadowsocks | full relay round-trip over TCP (SIP004 AEAD) | derives the session subkey with HKDF-SHA1 over the password's EVP_BytesToKey master key; sends `[salt][AE len][tag][AE addr+GET][tag]`, requires the server's `[salt][AE chunk]` to decrypt into a relayed 2xx/3xx status line. AEAD-only: `aes-128/192/256-gcm`, `chacha20-ietf-poly1305` |
-| VMess | **deferred** — keeps v1 gating | AEAD header (UUID keyed) singular; ws/grpc-transport payloads rejected, zero ws/grpc alive in the pool today |
-| TUIC, Hysteria2 | **deferred** — keeps v1 gating | QUIC-based; no stdlib probe |
-| SSR | not assignable regardless (ADR-0002 / sing-box ≥ 1.6) | — |
+| HTTP | full relay round-trip (CONNECT proxy) | completes `CONNECT target` (2xx required), then requires the relayed target response to be a 2xx/3xx `HTTP/x.y` line |
+| SOCKS5 | full relay round-trip | method selection + CONNECT grant, then requires the relayed target response to be a 2xx/3xx `HTTP/x.y` line |
+| VMess | **deferred** — no relay probe | full AEAD client (UUID-keyed header) not implemented; not certified |
+| TUIC, Hysteria2 | **deferred** — no relay probe | QUIC-based; no probeable client; not certified |
+| SSR | not assignable regardless (ADR-0002 / sing-box ≥ 1.6) | no probe; never certified |
 
 Trade-offs, intentionally accepted and visible in the docs:
 
@@ -64,28 +66,33 @@ Trade-offs, intentionally accepted and visible in the docs:
   would re-open the exact hole this ADR closes. The ss probe was validated
   against a live sing-box 1.11.6 `shadowsocks` inbound (`aes-256-gcm` and
   `chacha20-ietf-poly1305`); a wrong password is correctly reported dead.
+- **The TCP-hello v1 path is removed entirely.** vmess, tuic, hysteria2 (and
+  ssr) are not certified at all until a real client exists: the QUIC protocols
+  particularly cannot be hello-certified — a live hysteria2 node in the pool was
+  *TCP*-reachable on :443 (a TLS front or honeypot), yet sing-box dials it over
+  QUIC, so it is dead-by-relay exactly like the ss collapse the probe fixes.
+  Better a node dropped than a hello-answering web server certified.
 - **WS/gRPC-transport nodes are rejected at probe time**, not attempted: the
   probe is plain TCP/TLS and cannot complete a WebSocket/gRPC upgrade, so a
   ws-fronted TLS server (e.g. Cloudflare Workers) answers the trojan handshake
   and then closes with `ws closed` — a false positive that assignment would
   otherwise certify. Only `type=tcp` (or an absent `type`) is relay-probeable.
   Benchmarked 0/74 across two ws-populated tunnels before this guard.
-  The gate covers **every protocol, v1-fallback included**: `_transport()`
-  reads the vless/trojan `?type=` and the vmess base64 payload's `net` field,
-  and `probeable()` returns false for a ws/grpc of either kind. Without the
-  vmess arm, a ws-fronted vmess slips past the raw-hello v1 check (it answers
-  a TCP hello), is certified alive, and its canned 4xx reach the tunnel at
-  connect time — 0/15 on 403s from a bench whose 10 assigned nodes were all
-  vmess-ws, indistinguishable from a dead pool at the report level.
+  The gate covers every probeable protocol: `_transport()` reads the
+  vless/trojan `?type=` and the vmess base64 payload's `net` field.
 
 ## Consequences
 
 - The pool shrinks discontinuously on redeploy: previously-`alive` non-relays
   are re-probed and demoted; assignment counts fall and tunnels start degraded
-  until genuinely relaying nodes arrive.
+  until genuinely relaying nodes arrive. The v1 removal drops every
+  hello-certified vmess/tuic/hysteria2 node outright (these may not relay).
 - The engine's copy of `engine/filter/probe.py` reads stdlib `socket`/`ssl`/
   `hashlib` plus **`cryptography`** for the AEAD ciphers (`AESGCM`,
   `ChaCha20Poly1305`, HKDF-SHA1) — a new engine-image dependency accepted by
   this ADR in exchange for closing the ss v1-gating hole.
+- HTTP and SOCKS5 forward proxies gain their own relay round-trips, so the
+  previously-hello-gated plain proxies are certifiable instead of dropped;
+  vmess/tuic/hysteria2/ssr have no probe and are not certified.
 - Health-check misses (30s cadence) keep their current semantics; v2 raises
   the bar at admission but does not change the renewal loop.

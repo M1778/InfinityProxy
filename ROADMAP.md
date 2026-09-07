@@ -42,15 +42,15 @@ force-renew, and inspect node latency live from the browser.
 
 ### Relay-grade liveness v2
 Real per-protocol relay handshakes replace the TCP-dial-plus-hello v1 probe;
-v1 admitted any echoing port. **Shipped** for the TCP family (ADR-0006): VLESS,
-Trojan, and Shadowsocks-AEAD are relay-certified (server response header bytes
-or decrypted relayed 2xx/3xx required), and the first benchmark traced the old
-failure class — HTTP responders certified alive — to a dead end. Remaining
-deferred tiers: the VMess AEAD client and the QUIC-based TUIC/Hysteria2, which
-keep v1 gating. ss methods outside the AEAD probe table (stream ciphers,
-2022-blake3, plugin URIs) are demoted, not v1-certified. The health loop needs a
-container-level miss in the same change: today a crash-looping tunnel container
-is invisible to node probes.
+v1 admitted any echoing port. **Shipped**: VLESS, Trojan, Shadowsocks-AEAD,
+HTTP, and SOCKS5 are relay-certified (server response header bytes or a decrypted
+or proxied 2xx/3xx target response required), and the first benchmark traced the
+old failure class — HTTP responders certified alive — to a dead end. The TCP-
+hello v1 path is removed entirely: VMess, TUIC, and Hysteria2 have no relay
+probe (deferred AEAD/QUIC clients) so they are not certified at all. ss methods
+outside the AEAD probe table (stream ciphers, 2022-blake3, plugin URIs) are
+demoted, not certified. The health loop needs a container-level miss in the
+same change: today a crash-looping tunnel container is invisible to node probes.
 
 ### Tunneled-failure attribution
 Make sing-box name the node that failed. ADR-0005 chose `url-test`, whose

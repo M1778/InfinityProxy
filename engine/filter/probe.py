@@ -1,16 +1,16 @@
 """Liveness probe for a single node (ADR-0006).
 
 v2 semantics: a node is alive only when the server itself completes its wire
-protocol against a probe request, never because it answered bytes. The TCP-plus-
-hello v1 check (which certified HTTP responders as proxies) is kept only for
-protocols whose full client is deferred: vmess/tuic/hysteria2.
+protocol against a probe request, never because it answered bytes. There is no
+TCP-hello v1 fallback: protocols without an implemented client here (vmess,
+tuic, hysteria2, ssr) are rejected, not hello-certified.
 
 Full relay checks:
 - VLESS over TCP or stdlib TLS: send a VLESS CONNECT header for a benign target,
   expect the server's 2-byte response header (`0x00 0x00`). "Echo" listeners and
   HTTP responders both fail: an HTTP reply's first byte is 0x48, not version 0.
 - Trojan over stdlib TLS: send the CRLF/CMD/ATYP/ADDR/PORT/CRLF header with the
-  password's SHA224 hex payload, expect `\\r\\n`.
+  password's SHA224 hex payload, expect `\r\n`.
 - Shadowsocks (SIP004 AEAD ciphers): derive the session subkey with HKDF-SHA1
   from the EVP_BytesToKey MD5 master key plus a random salt, send
   `[salt][AE len][tag][AE addr+GET][tag]`, and require the server's own
@@ -18,6 +18,8 @@ Full relay checks:
   line. Chunk nonce is a little-endian counter incremented per AEAD op, exactly
   as sing-box's shadowaead framing. Stream ciphers and 2022-blake3 methods
   cannot be relay-certified and are rejected at probe time.
+- HTTP/SOCKS5 forward proxies: complete the CONNECT handshake to the target,
+  then require the relayed target response to be a 2xx/3xx `HTTP/x.y` line.
 
 The relayed bytes themselves must be a plausible `HTTP/x.y 2xx/3xx` status line
 from the requested target. A peer that answers the CONNECT with its own canned
@@ -26,7 +28,7 @@ handshake completed.
 
 Deliberately not emulated (documented in ADR-0006): reality's browser TLS
 fingerprint (stdlib cannot reproduce it, real hosts may false-negative), and
-ws/gRPC VLESS upgrades (the peer is always probed over plain TCP/TLS).
+ws/gRPC upgrades (the peer is always probed over plain TCP/TLS).
 """
 
 from __future__ import annotations
@@ -50,13 +52,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 
 from engine.models import Node, ProbeResult
 
-_HELLO = b"\x16\x03\x01\x00\x20\x01\x00\x00\x1c\x03\x03" + b"\x00" * 28
-
 _RELAY_PROTOCOLS = frozenset(("vless", "trojan"))
 
-_V1_FALLBACK_PROTOCOLS = frozenset(
-    ("vmess", "tuic", "hysteria2", "socks5", "http", "ssr")
-)
+_FORWARD_PROTOCOLS = frozenset(("http", "socks5"))
 
 _PATH_TARGET = os.environ.get("INFINITY_RELAY_TARGET_HOST", "www.google.com").encode(
     "ascii"
@@ -91,17 +89,16 @@ _SS_MAX_PACKET_SIZE = 16 * 1024 - 1  # 0x3FFF, sing-box / SIP004
 def probeable(node: Node) -> bool:
     """True when the node can complete a relay round-trip under this probe.
 
-    WS/gRPC transports cannot: the probe speaks plain TCP/TLS, so a ws-fronted
-    TLS server answers the header handshake and then closes — a false positive
-    documented in ADR-0006. This holds for every protocol, not just the relay
-    ones: a ws-fronted vmess (base64 JSON payload, `net` field) passes the v1
-    raw hello and sing-box still dials it, so its honeypot 4xx reach the tunnel
-    at connect time.
+    Every certified protocol has a real client handshake here: VLESS and Trojan
+    (relay), Shadowsocks AEAD (relay), and HTTP/SOCKS5 forward proxies
+    (CONNECT). WS/gRPC transports cannot: the probe speaks plain TCP/TLS, so a
+    ws-fronted TLS server answers the header handshake and then closes — a
+    false positive documented in ADR-0006.
 
-    Shadowsocks is additionally gated on the URI: only SIP004 AEAD methods on a
-    plain TCP conn (no plugin) can be relay-certified. Stream ciphers and
-    2022-blake3 methods are rejected here, not v1-certified, so no dead-by-relay
-    ss node can reach assignment.
+    Protocols with no implemented client (vmess, tuic, hysteria2, ssr) are
+    rejected even on plain TCP: a hello-able socket is not a proxy, so there is
+    no v1 fallback. Shadowsocks is additionally gated on the URI: only SIP004
+    AEAD methods on a plain TCP conn (no plugin) can be relay-certified.
     """
     if node.protocol == "ss":
         try:
@@ -109,7 +106,9 @@ def probeable(node: Node) -> bool:
         except ValueError:
             return False
         return plugin is None and method in _SS_AEAD_SPECS
-    return _transport(node) in ("tcp", "")
+    if node.protocol in _RELAY_PROTOCOLS or node.protocol in _FORWARD_PROTOCOLS:
+        return _transport(node) in ("tcp", "")
+    return False
 
 
 def probe(node: Node, timeout_s: float) -> ProbeResult:
@@ -128,7 +127,7 @@ def probe(node: Node, timeout_s: float) -> ProbeResult:
         elif node.protocol == "ss":
             alive, error = _attempt_ss_relay(node, deadline)
         else:
-            alive, error = _attempt_v1(node, deadline)
+            alive, error = _attempt_forward(node, deadline)
     except OSError as exc:
         error = (
             "timeout" if isinstance(exc, socket.timeout) else (exc.strerror or str(exc))
@@ -305,11 +304,12 @@ def _trojan_challenge(node: Node, conf: _RelayConfig, host: bytes, port: int) ->
 
 def _unprobeable_reason(node: Node) -> str:
     transport = _transport(node)
-    if transport not in ("tcp", ""):
-        return (
-            f"transport {transport!r} is not relay-probeable "
-            "(only plain TCP/TLS can complete a relay round-trip)"
-        )
+    if node.protocol in _RELAY_PROTOCOLS or node.protocol in _FORWARD_PROTOCOLS:
+        if transport not in ("tcp", ""):
+            return (
+                f"transport {transport!r} is not relay-probeable "
+                "(only plain TCP/TLS can complete a relay round-trip)"
+            )
     if node.protocol == "ss":
         try:
             method, _password, plugin = _ss_params(node)
@@ -326,9 +326,14 @@ def _unprobeable_reason(node: Node) -> str:
             "are SIP004 AEAD; stream and 2022-blake3 ciphers are not "
             "relay-certified)"
         )
+    if transport not in ("tcp", ""):
+        return (
+            f"transport {transport!r} is not relay-probeable "
+            "(only plain TCP/TLS can complete a relay round-trip)"
+        )
     return (
-        f"transport {transport!r} is not relay-probeable "
-        "(only plain TCP/TLS can complete a relay round-trip)"
+        f"protocol {node.protocol!r} has no relay probe (client not "
+        "implemented); not relay-probeable"
     )
 
 
@@ -467,19 +472,76 @@ def _recvn(sock: socket.socket, n: int) -> bytes:
     return bytes(total)
 
 
-# -- v1 gating for deferred protocols ------------------------------------------
+# -- http / socks5 forward-proxy relay round-trips -----------------------------
 
 
-def _attempt_v1(node: Node, deadline: float) -> tuple[bool, str | None]:
-    with socket.create_connection(
+def _attempt_forward(node: Node, deadline: float) -> tuple[bool, str | None]:
+    raw = socket.create_connection(
         (node.server, node.port), timeout=_remaining(deadline)
-    ) as sock:
-        if node.protocol in _V1_FALLBACK_PROTOCOLS:
-            sock.sendall(_HELLO)
-            sock.settimeout(_remaining(deadline))
-            if sock.recv(1) == b"":
-                raise ConnectionError("peer closed without a response")
+    )
+    with raw:
+        raw.settimeout(_remaining(deadline))
+        if node.protocol == "socks5":
+            alive, error = _socks5_setup(raw, node)
+            if not alive:
+                return False, error
+        else:
+            alive, error = _http_connect_setup(raw, node)
+            if not alive:
+                return False, error
+        sent = b"GET / HTTP/1.0\r\n\r\n"
+        raw.sendall(sent)
+        relayed = _recvn(raw, 16)
+        if sent.startswith(relayed):
+            return False, (
+                "proxy relayed our request bytes back (echo, non-proxy responder)"
+            )
+        if not _is_successful_http(relayed):
+            status = _http_status(relayed)
+            return False, (
+                f"peer answered {relayed[:24]!r} (status {status or 'unknown'}), "
+                "not a relayed 2xx/3xx response from the target "
+                "(canned-response honeypot)"
+            )
         return True, None
+
+
+def _http_connect_setup(raw: socket.socket, node: Node) -> tuple[bool, str | None]:
+    target = _PATH_TARGET + b":" + str(_TARGET_PORT).encode("ascii")
+    raw.sendall(b"CONNECT " + target + b" HTTP/1.1\r\nHost: " + target + b"\r\n\r\n")
+    resp = _read_until(raw, b"\r\n\r\n")
+    status = _http_status(resp)
+    if status is None or not 200 <= status < 400:
+        return False, f"http proxy rejected CONNECT with {resp[:40]!r}"
+    return True, None
+
+
+def _socks5_setup(raw: socket.socket, node: Node) -> tuple[bool, str | None]:
+    raw.sendall(b"\x05\x01\x00")
+    reply = _recvn(raw, 2)
+    if reply != b"\x05\x00":
+        return False, f"expected socks5 method selection b'\\x05\\x00', got {reply!r}"
+    connect = (
+        b"\x05\x01\x00\x03"
+        + bytes([len(_PATH_TARGET)])
+        + _PATH_TARGET
+        + _TARGET_PORT.to_bytes(2, "big")
+    )
+    raw.sendall(connect)
+    grant = _recvn(raw, 10)
+    if grant[:2] != b"\x05\x00":
+        return False, f"expected socks5 CONNECT grant, got {grant[:12]!r}"
+    return True, None
+
+
+def _read_until(conn: socket.socket, sentinel: bytes) -> bytes:
+    buf = bytearray()
+    while not buf.endswith(sentinel):
+        chunk = conn.recv(256)
+        if not chunk:
+            break
+        buf.extend(chunk)
+    return bytes(buf)
 
 
 def _remaining(deadline: float) -> float:
