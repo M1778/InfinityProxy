@@ -18,8 +18,18 @@ from engine.models import Tunnel
 
 try:
     from docker.errors import NotFound as _ContainerNotFound
+
+    def _docker_api_error() -> tuple[type[Exception], ...]:
+        from docker.errors import APIError, DockerException
+
+        return (APIError, DockerException)
+
 except ImportError:
     _ContainerNotFound = KeyError
+
+    def _docker_api_error() -> tuple[type[Exception], ...]:
+        return (OSError,)
+
 
 _CONFIG_PATH = "/etc/sing-box/config.json"
 
@@ -95,21 +105,30 @@ class ContainerController:
 
     def _run(self, name: str, config: dict) -> None:
         client = self.docker
-        container = client.containers.create(
-            self._settings.singbox_image,
-            # The official image entrypoint is bare `sing-box`; `run` must be
-            # given explicitly or the container just prints help and exits.
-            command=["run", "-c", _CONFIG_PATH],
-            name=name,
-            network_mode="host",
-            restart_policy={"Name": "always"},
-        )
+        try:
+            container = client.containers.create(
+                self._settings.singbox_image,
+                # The official image entrypoint is bare `sing-box`; `run` must be
+                # given explicitly or the container just prints help and exits.
+                command=["run", "-c", _CONFIG_PATH],
+                name=name,
+                network_mode="host",
+                restart_policy={"Name": "always"},
+            )
+        except _docker_api_error() as exc:
+            raise TunnelRuntimeUnavailable(str(exc)) from exc
         try:
             container.put_archive("/etc/", _config_tar(config))
             container.start()
-        except BaseException:
+        except _docker_api_error() as exc:
             # The container may have been created but never got a usable
             # config; do not leave a half-rolled shell behind.
+            try:
+                container.remove(force=True)
+            except Exception:  # noqa: BLE001 - cleanup is best-effort
+                pass
+            raise TunnelRuntimeUnavailable(str(exc)) from exc
+        except BaseException:
             try:
                 container.remove(force=True)
             except Exception:  # noqa: BLE001 - cleanup is best-effort

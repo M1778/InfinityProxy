@@ -183,6 +183,7 @@ Source cadences are per-source (see [docs/scraping.md](./scraping.md#source-mani
 | `not_found` | 404 | Unknown tunnel id |
 | `conflict` | 409 | Operation not valid for the tunnel state (e.g. renew while deleting) |
 | `port_exhausted` | 503 | No free ports left in `INFINITY_TUNNEL_RANGE` |
+| `tunnel_runtime` | 503 | Cannot spawn/roll a tunnel: docker daemon refused the operation (e.g. overlay mount busy); the tunnel is rolled back and no nodes are left stranded |
 | `internal` | 500 | Unexpected engine failure |
 
 ## Example session
