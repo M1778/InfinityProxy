@@ -78,9 +78,15 @@ that means:
 | `INFINITY_PROBE_TIMEOUT_MS` | 4000 ms per node |
 | `INFINITY_MAX_MISSES` | 2 consecutive misses ⇒ swap |
 | `INFINITY_HEALTH_INTERVAL_S` | 30 s per-tunnel re-check |
+| `INFINITY_PROBE_BUDGET_PER_REFRESH` | 5000 untested nodes probed per source refresh |
 
 - Candidates queue through the filter in batches of 50; each node has 4s to
   complete a handshake.
+- Each source refresh probes at most `INFINITY_PROBE_BUDGET_PER_REFRESH`
+  untested nodes, oldest-scraped first, plus a bounded dead-retest sample of
+  the refresh's own source. The pass never drains the whole untested queue in
+  one refresh, so a single flooded feed cannot stall every other source's
+  cadence; probes advance FIFO across refreshes instead.
 - Every batch verdict is written to the store as soon as it completes, so
   `alive` nodes surface incrementally while a large pass still runs — the pool
   is never held back until the full queue drains.

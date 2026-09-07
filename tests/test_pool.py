@@ -176,3 +176,66 @@ def test_demote_sweep_rejects_ws_transport_alive() -> None:
         assert demoted == 1
         assert store.pool_counts()["alive"] == 0
         assert store.pool_counts()["dead"] == 1
+
+
+def test_probe_new_respects_untested_budget() -> None:
+    from engine.config import Settings
+    from engine.models import NodeCandidate, SourceManifest
+    from engine.pool import _probe_new
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = Store(str(Path(tmp) / "t.db"))
+        store.create_schema()
+        store.upsert_candidates(
+            [
+                NodeCandidate(
+                    uri=f"vless://abc@1.0.0.{i}:443?type=tcp",
+                    protocol="vless",
+                    server=f"1.0.0.{i}",
+                    port=443,
+                    user="abc",
+                    source="test",
+                )
+                for i in range(1, 7)
+            ]
+        )
+        source = SourceManifest(
+            name="test",
+            urls=(),
+            cadence_s=60,
+            encoding="plain",
+            line_separated=True,
+            license="",
+            protocols=(),
+        )
+        settings = Settings(batch_size=50, probe_budget_per_refresh=2)
+
+        import engine.pool as pool_mod
+
+        probed: list[int] = []
+
+        def fake_batch_probe(nodes, **kwargs):
+            probed.append(len(nodes))
+
+            def on_batch(batch, **bkw):
+                kwargs["on_batch"](batch)
+
+            for node in nodes:
+                kwargs["on_batch"](
+                    {node.node_id: ProbeResult(node.node_id, alive=False)}
+                )
+            return {}
+
+        original = pool_mod.batch_probe
+        pool_mod.batch_probe = fake_batch_probe
+        try:
+            _probe_new(store, settings, source)
+            _probe_new(store, settings, source)
+        finally:
+            pool_mod.batch_probe = original
+
+        # Two refreshes, budget 2 each: the first drains 2 untested that become
+        # dead; the second takes the next 2 untested (FIFO) plus up to batch_size
+        # of this source's dead nodes for retest. No single refresh drains the
+        # whole queue: dead + untested stay bounded.
+        assert probed == [2, 4]

@@ -91,10 +91,14 @@ def demote_unrenderable(store: Store) -> int:
 
 
 def _probe_new(store: Store, settings: Settings, source: SourceManifest) -> None:
-    # Everything never probed becomes a candidate; a bounded sample of this
-    # source's dead nodes gets a retest on the source's own refresh cadence
-    # (docs/scraping.md: a dead node is re-probed when its source refreshes).
-    untested = store.load_nodes(state="untested")
+    # A bounded FIFO slice of everything never probed, plus this source's dead
+    # retest sample: docs/scraping.md stages the pass across cadences so one
+    # flooded feed cannot stall every other source's refresh. Fresh nodes
+    # surface incrementally because each refresh advances through untested it
+    # probed last time (dead & alive rows leave the untested set).
+    untested = store.load_nodes(
+        state="untested", limit=settings.probe_budget_per_refresh, oldest_first=True
+    )
     dead = store.load_nodes(state="dead", source=source.name)
     nodes = untested + dead[: settings.batch_size]
     if not nodes:

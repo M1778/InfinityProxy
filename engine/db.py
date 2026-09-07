@@ -235,6 +235,8 @@ class Store:
         state: str | None = None,
         protocols: set[str] | None = None,
         source: str | None = None,
+        limit: int | None = None,
+        oldest_first: bool = False,
     ) -> list[Node]:
         sql = "SELECT * FROM nodes"
         clauses: list[str] = []
@@ -250,6 +252,11 @@ class Store:
             params.append(source)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
+        if oldest_first:
+            sql += " ORDER BY first_seen_s, node_id"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_node(r) for r in rows]

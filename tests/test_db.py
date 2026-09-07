@@ -166,6 +166,24 @@ def test_load_node_filters(store: Store) -> None:
     assert store.load_nodes(state="alive") == []
 
 
+def test_load_nodes_limit_and_oldest_first(store: Store) -> None:
+    store.upsert_candidates(
+        [
+            make_candidate(source="a", server="1.1.1.1"),
+            make_candidate(source="b", server="2.2.2.2"),
+            make_candidate(source="c", server="3.3.3.3"),
+        ]
+    )
+    all_nodes = store.load_nodes()
+
+    limited = store.load_nodes(limit=2)
+    assert len(limited) == 2
+    fifo = store.load_nodes(oldest_first=True)
+    assert {n.node_id for n in fifo} == {n.node_id for n in all_nodes}
+    first_two = store.load_nodes(limit=2, oldest_first=True)
+    assert first_two[0].first_seen_s <= first_two[1].first_seen_s
+
+
 def test_apply_probe_results_flips_states(store: Store) -> None:
     store.upsert_candidates(
         [

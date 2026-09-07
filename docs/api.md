@@ -168,6 +168,7 @@ All overridable via environment variables (defaults in brackets).
 | `INFINITY_TUNNEL_RANGE` | `10000-59999` | Ports allocatable for tunnels, `"start-end"` |
 | `INFINITY_BATCH_SIZE` | `50` | Concurrent liveness probes per batch |
 | `INFINITY_PROBE_TIMEOUT_MS` | `4000` | Per-node handshake timeout |
+| `INFINITY_PROBE_BUDGET_PER_REFRESH` | `5000` | Untested nodes probed per source refresh |
 | `INFINITY_HEALTH_INTERVAL_S` | `30` | Per-tunnel health-check interval |
 | `INFINITY_MAX_MISSES` | `2` | Consecutive failures before a node is swapped |
 | `INFINITY_DB` | `infinity.db` | SQLite file path |

@@ -19,6 +19,7 @@ class Settings:
     tunnel_port_end: int = 59999
     batch_size: int = 50
     probe_timeout_ms: int = 4000
+    probe_budget_per_refresh: int = 5000
     health_interval_s: int = 30
     max_misses: int = 2
     db_path: str = "infinity.db"
@@ -38,6 +39,9 @@ class Settings:
             probe_timeout_ms=_env_int("INFINITY_PROBE_TIMEOUT_MS", 4000),
             health_interval_s=_env_int("INFINITY_HEALTH_INTERVAL_S", 30),
             max_misses=_env_int("INFINITY_MAX_MISSES", 2),
+            probe_budget_per_refresh=_env_int(
+                "INFINITY_PROBE_BUDGET_PER_REFRESH", 5000
+            ),
             db_path=os.environ.get("INFINITY_DB", "infinity.db"),
             singbox_image=os.environ.get(
                 "INFINITY_SINGBOX_IMAGE", "ghcr.io/sagernet/sing-box:v1.11.6"
