@@ -156,6 +156,20 @@ def test_render_config_shape_and_inbounds() -> None:
     assert rotator["type"] == "urltest"
     assert rotator["tag"] == ROTATOR_TAG
     assert rotator["outbounds"] == tags
+    # No interval passed: sing-box's stock 3m health-check cadence applies.
+    assert "interval" not in rotator
+
+
+@pytest.mark.parametrize("interval", [10, 30, 300])
+def test_urltest_interval_rendered_when_requested(interval: int) -> None:
+    tunnel = make_tunnel()
+    node = make_node("n_itv", VLESS_URI, "vless", "vless.example.com", 443)
+    rotator = next(
+        o
+        for o in render_config(tunnel, [node], urltest_interval_s=interval)["outbounds"]
+        if o["tag"] == ROTATOR_TAG
+    )
+    assert rotator["interval"] == f"{interval}s"
 
 
 def test_ss_percent_encoded_userinfo_decodes() -> None:

@@ -177,7 +177,9 @@ class Engine:
             and (self._rendered[tunnel_id][1])
         ):
             return
-        config = render_config(tunnel, nodes)
+        config = render_config(
+            tunnel, nodes, urltest_interval_s=self.settings.urltest_interval_s
+        )
         try:
             self.controller.update(tunnel_id, config)
         except TunnelRuntimeUnavailable:

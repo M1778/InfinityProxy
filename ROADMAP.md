@@ -53,12 +53,15 @@ demoted, not certified. The health loop needs a container-level miss in the
 same change: today a crash-looping tunnel container is invisible to node probes.
 
 ### Tunneled-failure attribution
-Make sing-box name the node that failed. ADR-0005 chose `url-test`, whose
-aggregate outbound hides the failing peer (`outbound/rotator`), so sing-box
+The rotator's health-check cadence is now tunable (`INFINITY_URTEST_INTERVAL_S`,
+default 30s), so sing-box's *container-side* view excludes a just-died node
+within one cadence instead of the stock 3 minutes. What remains: mapping a
+failed client dial *to a node* for engine-side, immediate demotion. ADR-0005's
+`urltest` aggregate hides the failing peer (`outbound/rotator`), so sing-box
 relay errors like `unknown version: 72` (an HTTP responder on the port) cannot
-be mapped to a node for demotion. A per-node outbound with dial-time fallback
-(`load-balance`, or `urltest` whose selection keeps a `FixURL`/`url` per node
-for logging) would let the engine demote nod-house relay failures directly.
+be named. A per-node outbound with dial-time fallback (`load-balance`), or a
+Clash-API surface per tunnel exposing each node's `alive`/delay for the engine
+to scrape, would close it.
 
 ### Smarter renew avoidance
 Make renewal strictly avoid re-picking nodes that recently failed for a tunnel,

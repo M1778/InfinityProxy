@@ -79,7 +79,11 @@ def node_tag(node: Node) -> str:
     return f"n_{node.node_id}"
 
 
-def render_config(tunnel: Tunnel, nodes: list[Node]) -> dict[str, Any]:
+def render_config(
+    tunnel: Tunnel,
+    nodes: list[Node],
+    urltest_interval_s: int | None = None,
+) -> dict[str, Any]:
     """Build the sing-box config dict for a tunnel over its assigned nodes."""
     tags = [node_tag(n) for n in nodes]
     outbounds = [_outbound_from_node(n) for n in nodes]
@@ -89,7 +93,14 @@ def render_config(tunnel: Tunnel, nodes: list[Node]) -> dict[str, Any]:
         # the renewal loop tops the tunnel up.
         tags = [BLOCK_TAG]
         outbounds.append({"type": "block", "tag": BLOCK_TAG})
-    outbounds.append({"type": "urltest", "tag": ROTATOR_TAG, "outbounds": tags})
+    rotator: dict[str, Any] = {"type": "urltest", "tag": ROTATOR_TAG, "outbounds": tags}
+    # urltest's stock health-check interval is 3m; over churny free nodes a dead
+    # peer stays selectable far longer than the engine's 30s probe loop. A short
+    # interval makes the rotator self-heal: sing-box excludes the failed node
+    # from selection on the next cycle, without waiting for a config rewrite.
+    if urltest_interval_s is not None:
+        rotator["interval"] = f"{urltest_interval_s}s"
+    outbounds.append(rotator)
     return {
         "log": {"level": "warn"},
         # One `mixed` inbound serves both SOCKS5 and HTTP on the same port:

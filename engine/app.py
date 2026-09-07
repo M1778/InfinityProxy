@@ -67,7 +67,9 @@ def create_app(
         except PortExhausted as exc:
             return err("port_exhausted", str(exc), 503)
         try:
-            config = render_config(tunnel, nodes)
+            config = render_config(
+                tunnel, nodes, urltest_interval_s=settings.urltest_interval_s
+            )
         except ValueError as exc:
             # A node set that sing-box cannot represent must never strand a
             # half-created tunnel: release and roll it back, then report why.

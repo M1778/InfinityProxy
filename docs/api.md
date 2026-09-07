@@ -171,6 +171,7 @@ All overridable via environment variables (defaults in brackets).
 | `INFINITY_PROBE_BUDGET_PER_REFRESH` | `5000` | Untested nodes probed per source refresh |
 | `INFINITY_HEALTH_INTERVAL_S` | `30` | Per-tunnel health-check interval |
 | `INFINITY_MAX_MISSES` | `2` | Consecutive failures before a node is swapped |
+| `INFINITY_URTEST_INTERVAL_S` | `30` | Per-tunnel sing-box `urltest` health-check cadence; the rotator re-probes its nodes at this rate and excludes dead ones from selection (clamped to ≥ 10s, sing-box's minimum) |
 | `INFINITY_DB` | `infinity.db` | SQLite file path |
 
 Source cadences are per-source (see [docs/scraping.md](./scraping.md#source-manifest)).

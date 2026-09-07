@@ -22,6 +22,7 @@ class Settings:
     probe_budget_per_refresh: int = 5000
     health_interval_s: int = 30
     max_misses: int = 2
+    urltest_interval_s: int = 30
     db_path: str = "infinity.db"
     singbox_image: str = "ghcr.io/sagernet/sing-box:v1.11.6"
     engine_name_prefix: str = "infinity"
@@ -39,6 +40,7 @@ class Settings:
             probe_timeout_ms=_env_int("INFINITY_PROBE_TIMEOUT_MS", 4000),
             health_interval_s=_env_int("INFINITY_HEALTH_INTERVAL_S", 30),
             max_misses=_env_int("INFINITY_MAX_MISSES", 2),
+            urltest_interval_s=max(10, _env_int("INFINITY_URTEST_INTERVAL_S", 30)),
             probe_budget_per_refresh=_env_int(
                 "INFINITY_PROBE_BUDGET_PER_REFRESH", 5000
             ),
