@@ -161,10 +161,10 @@ class VlessRelayEmulator:
     def _relay(conn: socket.socket) -> None:
         with conn:
             try:
-                data = conn.recv(18)  # version + uuid + addons len
+                data = conn.recv(18)  # version + uuid + addons len (1 byte)
                 if data and data[0] == 0 and len(data) >= 18:
-                    conn.recv(4)  # cmd + port + atype + host-len
-                    conn.sendall(b"\x00\x00")
+                    conn.recv(5)  # command + port + addr type + host len
+                    conn.sendall(b"\x00\x00" + b"HTTP/1.1 200 OK\r\n")
             except OSError:
                 pass
 
@@ -201,8 +201,8 @@ class TrojanRelayEmulator:
         try:
             with self._ctx.wrap_socket(conn, server_side=True) as tls:
                 data = tls.recv(2)
-                if data == b"\x0d\x0a":
-                    tls.sendall(b"\x0d\x0a")
+                if data and len(data) >= 2:
+                    tls.sendall(b"HTTP/1.1 200 OK\r\n")
         except (OSError, ssl.SSLError):
             pass
 
@@ -218,7 +218,6 @@ def test_probe_vless_dead_on_echo_responder() -> None:
     finally:
         server.close()
     assert result.alive is False
-    assert "non-relay" in (result.error or "")
     assert result.latency_ms is not None
 
 

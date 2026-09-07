@@ -51,10 +51,17 @@ response to a ping. Since [ADR-0006](./adr/0006-relay-grade-liveness-probes.md),
 that means:
 
 - **VLESS and Trojan** (the TCP-capable majority of the pool) are probe-relayed:
-  the probe sends a genuine protocol header for a benign target and requires the
-  server's protocol response bytes — for VLESS the `0x00 0x00` header reply, for
-  Trojan the CRLF ack over TLS. An HTTP responder (`0x48` first byte), a TLS
-  alert, or an echoer all fail.
+  the probe sends a genuine protocol header for a benign target and then pushes a
+  minimal HTTP `GET` through the tunnel. Liveness is a **full relay round-trip**:
+  the server must parse the header, dial the target, and echo foreign bytes back.
+  VLESS additionally requires the `0x00 0x00` response header before data; Trojan
+  (no response header) requires any relayed bytes. A server that times out, whose
+  first bytes are our own handshake (echoer), or whose bytes come without the
+  VLESS header (an HTTP responder answering a raw `GET`) all fail.
+- The relay target is `https`/TCP `80` at `www.google.com` by default, overridable
+  with `INFINITY_RELAY_TARGET_HOST` / `INFINITY_RELAY_TARGET_PORT`; a target that
+  answers on accept (or to the probe GET) without needing a browser is required —
+  sing-box only emits the VLESS ack after the target returns bytes.
 - **Shadowsocks, VMess, TUIC, Hysteria2** keep v1 gating (full AEAD/QUIC
   clients are deferred); these are not relay-certified.
 - Reality-fronted VLESS and ws/gRPC VLESS can fail false-negative: the stdlib

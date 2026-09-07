@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import os
 import socket
 import ssl
 import time
@@ -37,8 +38,10 @@ _V1_FALLBACK_PROTOCOLS = frozenset(
     ("vmess", "ss", "tuic", "hysteria2", "socks5", "http", "ssr")
 )
 
-_PATH_TARGET = b"www.google.com"
-_TARGET_PORT = 80
+_PATH_TARGET = os.environ.get("INFINITY_RELAY_TARGET_HOST", "www.google.com").encode(
+    "ascii"
+)
+_TARGET_PORT = int(os.environ.get("INFINITY_RELAY_TARGET_PORT", "80"))
 
 
 def probe(node: Node, timeout_s: float) -> ProbeResult:
@@ -84,7 +87,7 @@ def _attempt_relay(node: Node, deadline: float) -> tuple[bool, str | None]:
     )
     with raw:
         raw.settimeout(_remaining(deadline))
-        sent = _challenge_for(node.protocol, conf, node)
+        sent = _challenge_for(node.protocol, conf, node) + b"GET / HTTP/1.0\r\n\r\n"
         if conf.tls:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
@@ -92,19 +95,26 @@ def _attempt_relay(node: Node, deadline: float) -> tuple[bool, str | None]:
             with ctx.wrap_socket(raw, server_hostname=conf.sni or node.server) as tls:
                 tls.settimeout(_remaining(deadline))
                 tls.sendall(sent)
-                expected = _expected_reply(node.protocol)
-                reply = tls.recv(2)
-        else:
-            raw.sendall(sent)
-            expected = _expected_reply(node.protocol)
-            reply = raw.recv(2)
-        if reply == expected:
-            return True, None
+                return _judge(node, tls, sent)
+        raw.sendall(sent)
+        return _judge(node, raw, sent)
+
+
+def _judge(node: Node, conn: socket.socket, sent: bytes) -> tuple[bool, str | None]:
+    reply = _recvn(conn, 2)
+    if node.protocol == "vless" and reply != b"\x00\x00":
         return False, (
-            f"expected {node.protocol} reply {expected!r}, got {reply[:2]!r} "
+            f"expected vless reply b'\\x00\\x00', got {reply[:2]!r} "
             "(non-relay responder)"
         )
-    return False, "closed before reply"
+    got = reply + _recvn(conn, 14)
+    if node.protocol == "trojan" and not got:
+        return False, "closed before any relayed bytes (non-relay responder)"
+    if sent.startswith(got):
+        return False, (
+            "server relayed our handshake bytes back (echo, non-relay responder)"
+        )
+    return True, None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -140,10 +150,10 @@ def _vless_challenge(node: Node, conf: _RelayConfig, host: bytes, port: int) -> 
     return (
         b"\x00"  # version
         + uuid_bytes  # 16 bytes
-        + b"\x00"  # addons length
-        + b"\x01"  # command: CONNECT
-        + port.to_bytes(2, "big")
-        + b"\x03"  # address type: domain
+        + b"\x00"  # addons length (1 byte, uint8; sing-box vless v0.2.0)
+        + b"\x01"  # command: TCP connect
+        + port.to_bytes(2, "big")  # target port, before the address
+        + b"\x02"  # address type: FQDN (sing-box serializer: 0x02, not 0x03)
         + bytes([len(host)])
         + host
     )
@@ -154,19 +164,25 @@ def _trojan_challenge(node: Node, conf: _RelayConfig, host: bytes, port: int) ->
     password = unquote(u.username or "")
     sha_hex = hashlib.sha224(password.encode("utf-8")).hexdigest().encode("ascii")
     return (
-        b"\x0d\x0a"
-        + b"\x01"  # command: CONNECT
-        + b"\x03"  # address type: domain
+        sha_hex
+        + b"\x0d\x0a"
+        + b"\x01"  # command: TCP connect
+        + b"\x03"  # address type: FQDN (sing serializer: 0x03, not 0x02)
         + bytes([len(host)])
         + host
         + port.to_bytes(2, "big")
         + b"\x0d\x0a"
-        + sha_hex
     )
 
 
-def _expected_reply(protocol: str) -> bytes:
-    return b"\r\n" if protocol == "trojan" else b"\x00\x00"
+def _recvn(sock: socket.socket, n: int) -> bytes:
+    total = bytearray()
+    while len(total) < n:
+        chunk = sock.recv(n - len(total))
+        if not chunk:
+            return bytes(total)
+        total.extend(chunk)
+    return bytes(total)
 
 
 # -- v1 gating for deferred protocols ------------------------------------------

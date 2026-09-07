@@ -24,8 +24,8 @@ not when any bytes come back.
 
 | Protocol | v2 probe | Notes |
 | --- | --- | --- |
-| VLESS | full header relay check over TCP or stdlib TLS | expects the `0x00 0x00` response header bytes |
-| Trojan | full header relay check over stdlib TLS + CRLF response | TLS is mandatory for trojan; needs `sni` |
+| VLESS | full relay round-trip over TCP or stdlib TLS | sends header + a `GET`; requires the `0x00 0x00` response header followed by foreign bytes |
+| Trojan | full relay round-trip over stdlib TLS | TLS is mandatory; sends header + a `GET`, accepts any relayed bytes (no response header exists) |
 | Shadowsocks | **deferred** — keeps v1 gating | full AEAD client needs a verified implementation; uncertified |
 | VMess | **deferred** — keeps v1 gating | AEAD header (UUID keyed) singular; zero alive in the pool today |
 | TUIC, Hysteria2 | **deferred** — keeps v1 gating | QUIC-based; no stdlib probe |
@@ -40,8 +40,9 @@ Trade-offs, intentionally accepted and visible in the docs:
 - **WS/gRPC VLESS transports** are probed as plain TCP/TLS, not upgraded. A
   real ws server (which we have never observed relaying) may be dropped; every
   HTTP responder keeps being rejected, which is the failure class that exists.
-- Requiring the full 2-byte response header kills "echo" certifiers — a
-  listener that merely answers bytes — which v1 could not distinguish.
+- Requiring the full relay round-trip (header ack + foreign bytes) kills both
+  "echo" certifiers — a listener that merely answers back the bytes it received —
+  and HTTP responders, which v1 could not distinguish.
 
 ## Consequences
 
