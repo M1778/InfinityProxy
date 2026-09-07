@@ -291,6 +291,7 @@ class FakeContainer:
 
     def remove(self, force: bool = False) -> None:
         self.removed = True
+        self.remove_force = force
         self._registry.pop(self.name, None)
 
     def restart(self) -> None:
@@ -422,7 +423,23 @@ def test_stop_tolerates_already_stopped_304_error() -> None:
     controller.stop("tu_4")
 
     assert container.removed is True
+    assert container.remove_force is True
     assert "infinity-tu_4" not in fake.containers.registry
+
+
+def test_stop_removes_running_container_when_stop_fails() -> None:
+    fake = FakeDocker()
+    controller = ContainerController(SETTINGS, docker_client=fake)
+    controller.start(make_tunnel("tu_5"), {"log": {"level": "warn"}})
+    container = fake.containers.get("infinity-tu_5")
+    container.stop_raise = RuntimeError("daemon hiccup")
+
+    controller.stop("tu_5")
+
+    # A failed stop must not leave a running container behind.
+    assert container.removed is True
+    assert container.remove_force is True
+    assert "infinity-tu_5" not in fake.containers.registry
 
 
 def test_restart_restarts_existing_container() -> None:

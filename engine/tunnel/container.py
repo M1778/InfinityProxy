@@ -21,7 +21,7 @@ try:
 except ImportError:
     _ContainerNotFound = KeyError
 
-_CONFIG_MOUNT_TARGET = "/etc/sing-box/config.json"
+_CONFIG_PATH = "/etc/sing-box/config.json"
 
 
 class TunnelRuntimeUnavailable(RuntimeError):
@@ -72,7 +72,7 @@ class ContainerController:
         self._run(name, config)
 
     def restart(self, tunnel_id: str) -> None:
-        """Restart the container in place (same config mount)."""
+        """Restart the container in place (same shipped config)."""
         container = self.docker.containers.get(self._container_name(tunnel_id))
         container.restart()
 
@@ -99,7 +99,7 @@ class ContainerController:
             self._settings.singbox_image,
             # The official image entrypoint is bare `sing-box`; `run` must be
             # given explicitly or the container just prints help and exits.
-            command=["run", "-c", _CONFIG_MOUNT_TARGET],
+            command=["run", "-c", _CONFIG_PATH],
             name=name,
             network_mode="host",
             restart_policy={"Name": "always"},
@@ -123,13 +123,14 @@ class ContainerController:
             container = None
         if container is not None:
             # stop() is best-effort: docker returns a 304 for an already-stopped
-            # container and may hiccup on a dying one, but remove() must still
-            # clear the container either way.
+            # container and may hiccup on a dying one. remove(force=True) must
+            # still clear the container either way, otherwise a still-running
+            # container would block cleanup with a 409.
             try:
                 container.stop()
             except Exception:  # noqa: BLE001 - cleanup must proceed regardless
                 pass
-            container.remove()
+            container.remove(force=True)
 
 
 def _config_tar(config: dict) -> bytes:
