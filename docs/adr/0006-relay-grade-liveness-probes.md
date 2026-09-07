@@ -24,8 +24,8 @@ not when any bytes come back.
 
 | Protocol | v2 probe | Notes |
 | --- | --- | --- |
-| VLESS | full relay round-trip over TCP or stdlib TLS | sends header + a `GET`; requires the `0x00 0x00` response header followed by foreign bytes |
-| Trojan | full relay round-trip over stdlib TLS | TLS is mandatory; sends header + a `GET`, accepts any relayed bytes (no response header exists) |
+| VLESS | full relay round-trip over TCP or stdlib TLS | sends header + a `GET`; requires the `0x00 0x00` response header followed by a relayed 2xx/3xx `HTTP/x.y` status line |
+| Trojan | full relay round-trip over stdlib TLS | TLS is mandatory; sends header + a `GET`, requires the relayed bytes to be a 2xx/3xx `HTTP/x.y` status line |
 | Shadowsocks | **deferred** — keeps v1 gating | full AEAD client needs a verified implementation; uncertified |
 | VMess | **deferred** — keeps v1 gating | AEAD header (UUID keyed) singular; zero alive in the pool today |
 | TUIC, Hysteria2 | **deferred** — keeps v1 gating | QUIC-based; no stdlib probe |
@@ -37,9 +37,23 @@ Trade-offs, intentionally accepted and visible in the docs:
   with a browser TLS fingerprint; a stdlib ClientHello is not one, so genuine
   reality nodes can be classified dead. Better a node dropped than a web server
   certified; the first benchmark observed zero working relays anyway.
-- Requiring the full relay round-trip (header ack + foreign bytes) kills both
-  "echo" certifiers — a listener that merely answers back the bytes it received —
-  and HTTP responders, which v1 could not distinguish.
+- Requiring the full relay round-trip (header ack + a relayed 2xx/3xx HTTP
+  status line) kills both "echo" certifiers — a listener that merely answers
+  back the bytes it received — and HTTP responders, which v1 could not
+  distinguish.
+- **Canned-response honeypots are rejected.** A peer that completes the wire
+  handshake and then answers the CONNECT with its *own* HTTP error (e.g. a
+  canned `HTTP/1.1 400 Bad Request` from a local nginx) was, before this
+  amendment, certified alive: handshake bytes arrived, so relays "worked".
+  The probe now demands the relayed bytes look like a genuine `2xx/3xx`
+  response *from the requested target*. 66/104 alive trojans in the live pool
+  (all from one feed's `rooster465` subdomains) were canned-400 honeypots; they
+  relayed the canned error to every tunnel client (`SSLError` on the bench).
+  A real target (`www.google.com:80`) returns `HTTP/1.0 200 OK` to the probe's
+  `GET /`, so genuine relays pass and the honeypots fail.
+- The status-line gate can false-negative a genuine relay whose target replies
+  with a 4xx/5xx (the probe always `GET /`es a benign target, so this is rare);
+  better a working node dropped than a honeypot certified.
 - **WS/gRPC-transport nodes are rejected at probe time**, not attempted: the
   probe is plain TCP/TLS and cannot complete a WebSocket/gRPC upgrade, so a
   ws-fronted TLS server (e.g. Cloudflare Workers) answers the trojan handshake

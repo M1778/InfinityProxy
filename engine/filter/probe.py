@@ -12,6 +12,11 @@ Full relay checks:
 - Trojan over stdlib TLS: send the CRLF/CMD/ATYP/ADDR/PORT/CRLF header with the
   password's SHA224 hex payload, expect `\\r\\n`.
 
+The relayed bytes themselves must be a plausible `HTTP/x.y 2xx/3xx` status line
+from the requested target. A peer that answers the CONNECT with its own canned
+HTTP error (a honeypot fronting the target) is rejected even though the wire
+handshake completed.
+
 Deliberately not emulated (documented in ADR-0006): reality's browser TLS
 fingerprint (stdlib cannot reproduce it, real hosts may false-negative), and
 ws/gRPC VLESS upgrades (the peer is always probed over plain TCP/TLS).
@@ -22,6 +27,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import os
+import re
 import socket
 import ssl
 import time
@@ -134,7 +140,26 @@ def _judge(node: Node, conn: socket.socket, sent: bytes) -> tuple[bool, str | No
         return False, (
             "server relayed our handshake bytes back (echo, non-relay responder)"
         )
+    if not _is_successful_http(got):
+        status = _http_status(got)
+        return False, (
+            f"peer answered {got[:24]!r} (status {status or 'unknown'}), not "
+            "a relayed 2xx/3xx response from the target (canned-response honeypot)"
+        )
     return True, None
+
+
+_HTTP_STATUS_RE = re.compile(rb"HTTP/[0-9.]+ ([0-9]{3})")
+
+
+def _http_status(data: bytes) -> int | None:
+    match = _HTTP_STATUS_RE.search(data)
+    return int(match.group(1)) if match else None
+
+
+def _is_successful_http(data: bytes) -> bool:
+    status = _http_status(data)
+    return status is not None and 200 <= status < 400
 
 
 @dataclasses.dataclass(frozen=True)

@@ -143,10 +143,11 @@ class Responder:
 class VlessRelayEmulator:
     """Answers a well-formed VLESS CONNECT header with the 2-byte response."""
 
-    def __init__(self) -> None:
+    def __init__(self, payload: bytes = b"\x00\x00" + b"HTTP/1.1 200 OK\r\n") -> None:
         self.sock = socket.create_server(("127.0.0.1", 0))
         self.sock.listen(16)
         self.port = self.sock.getsockname()[1]
+        self._payload = payload
         self._stop = threading.Event()
         threading.Thread(target=self._serve, daemon=True).start()
 
@@ -158,14 +159,13 @@ class VlessRelayEmulator:
                 return
             threading.Thread(target=self._relay, args=(conn,), daemon=True).start()
 
-    @staticmethod
-    def _relay(conn: socket.socket) -> None:
+    def _relay(self, conn: socket.socket) -> None:
         with conn:
             try:
                 data = conn.recv(18)  # version + uuid + addons len (1 byte)
                 if data and data[0] == 0 and len(data) >= 18:
                     conn.recv(5)  # command + port + addr type + host len
-                    conn.sendall(b"\x00\x00" + b"HTTP/1.1 200 OK\r\n")
+                    conn.sendall(self._payload)
             except OSError:
                 pass
 
@@ -177,7 +177,7 @@ class VlessRelayEmulator:
 class TrojanRelayEmulator:
     """TLS-wraps the connection and answers a valid trojan header with CRLF."""
 
-    def __init__(self) -> None:
+    def __init__(self, payload: bytes = b"HTTP/1.1 200 OK\r\n") -> None:
         self.sock = socket.create_server(("127.0.0.1", 0))
         self.sock.listen(16)
         self.port = self.sock.getsockname()[1]
@@ -187,6 +187,7 @@ class TrojanRelayEmulator:
             keyfile=str(_FIXTURES / "key.pem"),
         )
         self._ctx = ctx
+        self._payload = payload
         self._stop = threading.Event()
         threading.Thread(target=self._serve, daemon=True).start()
 
@@ -203,13 +204,17 @@ class TrojanRelayEmulator:
             with self._ctx.wrap_socket(conn, server_side=True) as tls:
                 data = tls.recv(2)
                 if data and len(data) >= 2:
-                    tls.sendall(b"HTTP/1.1 200 OK\r\n")
+                    tls.sendall(self._payload)
         except (OSError, ssl.SSLError):
             pass
 
     def close(self) -> None:
         self._stop.set()
         self.sock.close()
+
+
+def _canned_nginx_400(payload: bytes) -> bytes:
+    return payload + b"HTTP/1.1 400 Bad Request\r\nServer: nginx/1.25.2\r\n\r\n"
 
 
 def test_probe_vless_dead_on_echo_responder() -> None:
@@ -317,6 +322,31 @@ def test_probe_trojan_dead_on_plain_http_responder() -> None:
         server.close()
     assert result.alive is False
     assert result.error
+
+
+def test_probe_trojan_dead_on_canned_http_400_responder() -> None:
+    # A peer that answers the relay CONNECT with its own canned HTTP error is a
+    # honeypot: it is not relaying to the requested target. Its reply must not
+    # certify it as alive even though a full handshake completed.
+    server = TrojanRelayEmulator(payload=_canned_nginx_400(b""))
+    try:
+        result = real_probe(make_node("ht", server.port, "trojan"), timeout_s=1.0)
+    finally:
+        server.close()
+    assert result.alive is False
+    assert "HTTP" in (result.error or "")
+
+
+def test_probe_vless_dead_on_canned_http_400_responder() -> None:
+    # Same honeypot class over VLESS: the relay ack (0x00 0x00) completes but
+    # the "relayed" bytes are the peer's own canned HTTP error, not a target.
+    server = VlessRelayEmulator(payload=_canned_nginx_400(b"\x00\x00"))
+    try:
+        result = real_probe(make_node("hv", server.port, "vless"), timeout_s=1.0)
+    finally:
+        server.close()
+    assert result.alive is False
+    assert "HTTP" in (result.error or "")
 
 
 def test_batch_probe_returns_a_result_for_every_node() -> None:
