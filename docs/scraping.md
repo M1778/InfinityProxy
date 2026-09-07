@@ -45,9 +45,20 @@ Sources are table-driven: adding or removing a feed is configuration, not code.
 
 ## Liveness filter
 
-The pool only contains nodes that passed a **real protocol handshake** — a TCP
-dial plus a protocol-specific handshake/hello through the node, which actually
-confirms the node relays, not just that it answers a ping.
+The pool only contains nodes that passed a **real protocol handshake** — the
+server completes the node's own wire protocol against the probe, not just a
+response to a ping. Since [ADR-0006](./adr/0006-relay-grade-liveness-probes.md),
+that means:
+
+- **VLESS and Trojan** (the TCP-capable majority of the pool) are probe-relayed:
+  the probe sends a genuine protocol header for a benign target and requires the
+  server's protocol response bytes — for VLESS the `0x00 0x00` header reply, for
+  Trojan the CRLF ack over TLS. An HTTP responder (`0x48` first byte), a TLS
+  alert, or an echoer all fail.
+- **Shadowsocks, VMess, TUIC, Hysteria2** keep v1 gating (full AEAD/QUIC
+  clients are deferred); these are not relay-certified.
+- Reality-fronted VLESS and ws/gRPC VLESS can fail false-negative: the stdlib
+  probe cannot reproduce a browser TLS fingerprint or a WebSocket upgrade.
 
 | Setting | Default |
 | --- | --- |

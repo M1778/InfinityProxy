@@ -23,7 +23,7 @@ them, too.
 | `docs/architecture.md` | Components, request flow, renewal loop, SQLite schema, planned src layout |
 | `docs/api.md` | Control API endpoints, payloads, errors, env config table |
 | `docs/scraping.md` | Source manifest, fetch loop, dedup, liveness filter, attribution |
-| `docs/adr/` | 5 accepted decisions (per-tunnel containers, SQLite, localhost API, MIT+attribution, urltest rotation) |
+| `docs/adr/` | 6 accepted decisions (per-tunnel containers, SQLite, localhost API, MIT+attribution, urltest rotation, relay-grade liveness) |
 | `docs/benchmark.md` | Real-stack benchmark harness results: first 10-minute run findings |
 | `ROADMAP.md` | v1 surface + post-v1 ambitions and stated no's |
 | `CONTRIBUTING.md` | Build, test, CI, and contribution conventions |
