@@ -24,14 +24,16 @@ jobs:
         with:
           context: .
           push: true
+          # GHCR registry paths must be lowercase; github.repository keeps the
+          # repo's original casing (InfinityProxy), so pin the lowercase path.
           tags: |
-            ghcr.io/${{ github.repository }}:engine-${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}:engine-latest
+            ghcr.io/m1778/infinityproxy:engine-${{ github.ref_name }}
+            ghcr.io/m1778/infinityproxy:engine-latest
       - name: Build and push tunnel image
         uses: docker/build-push-action@v6
         with:
           context: ./tunnel-image
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:tunnel-${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}:tunnel-latest
+            ghcr.io/m1778/infinityproxy:tunnel-${{ github.ref_name }}
+            ghcr.io/m1778/infinityproxy:tunnel-latest
