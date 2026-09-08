@@ -24,8 +24,17 @@
   <section id="view-overview" class="view" data-name="overview">
     <div class="cards" id="stat-cards"></div>
     <div class="charts">
-      <div class="chart-card"><h2>Pool over 2h</h2><canvas id="pool-chart"></canvas></div>
+      <div class="chart-card wide"><h2>Pool over 2h</h2><canvas id="pool-chart"></canvas></div>
       <div class="chart-card"><h2>Tunnels over 2h</h2><canvas id="tunnel-chart"></canvas></div>
+      <div class="chart-card"><h2>Pool split now</h2>
+        <div class="donut-wrap">
+          <canvas id="donut-chart"></canvas>
+          <div class="donut-center">
+            <span class="donut-total" id="donut-total">&ndash;</span>
+            <span class="donut-label" id="donut-inuse"></span>
+          </div>
+        </div>
+      </div>
       <div class="chart-card wide"><h2>Pool by protocol</h2><canvas id="proto-chart"></canvas></div>
     </div>
   </section>
@@ -64,7 +73,7 @@
     <div class="table-wrap">
       <table class="data-table" id="node-table">
         <thead><tr>
-          <th>id</th><th>protocol</th><th>server</th><th>source</th><th>state</th><th>latency</th><th>in use</th>
+          <th>id</th><th>protocol</th><th>server</th><th>source</th><th>state</th><th>latency</th><th>throughput</th><th>in use</th>
         </tr></thead>
         <tbody></tbody>
       </table>

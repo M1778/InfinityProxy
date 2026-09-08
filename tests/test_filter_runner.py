@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.ciphers.aead import (
     ChaCha20Poly1305,
 )
 
+from engine.filter.probe import ThroughputSpec
 from engine.filter.probe import probe as real_probe
 from engine.filter.runner import batch_probe
 from engine.models import Node, ProbeResult
@@ -216,6 +217,91 @@ class TrojanRelayEmulator:
                     tls.sendall(self._payload)
         except (OSError, ssl.SSLError):
             pass
+
+    def close(self) -> None:
+        self._stop.set()
+        self.sock.close()
+
+
+class VlessBodyServer:
+    """Answers a VLESS CONNECT header, then streams a large fixed body.
+
+    Mirrors a real download target reached *through* a relayed node: status
+    line first, then `body_bytes` of payload. Used to measure the probe's
+    throughput read.
+    """
+
+    def __init__(self, body_bytes: int = 1 << 20) -> None:
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port = self.sock.getsockname()[1]
+        self._payload = b"\x00\x00" + b"HTTP/1.1 200 OK\r\n\r\n" + (b"x" * body_bytes)
+        self._stop = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._relay, args=(conn,), daemon=True).start()
+
+    def _relay(self, conn: socket.socket) -> None:
+        try:
+            data = conn.recv(18)
+            if data and data[0] == 0 and len(data) >= 18:
+                conn.recv(5)
+                conn.sendall(self._payload)
+                conn.shutdown(socket.SHUT_WR)
+            while conn.recv(4096):
+                pass
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def close(self) -> None:
+        self._stop.set()
+        self.sock.close()
+
+
+class VlessNoBodyServer:
+    """Answers the VLESS header and the judge's 16 consumed bytes, then closes.
+
+    A peer that certifies the handshake but never delivers a usable download:
+    the throughput read must come back empty, so the pool can reject it.
+    """
+
+    def __init__(self) -> None:
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port = self.sock.getsockname()[1]
+        self._payload = b"\x00\x00" + b"HTTP/1.1 200 O"  # 16 bytes, judge-sized
+        self._stop = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._relay, args=(conn,), daemon=True).start()
+
+    def _relay(self, conn: socket.socket) -> None:
+        try:
+            data = conn.recv(18)
+            if data and data[0] == 0 and len(data) >= 18:
+                conn.recv(5)
+                conn.sendall(self._payload)
+                conn.shutdown(socket.SHUT_WR)
+            while conn.recv(4096):
+                pass
+        except OSError:
+            pass
+        finally:
+            conn.close()
 
     def close(self) -> None:
         self._stop.set()
@@ -607,6 +693,43 @@ def test_probe_vless_alive_on_relay_emulator() -> None:
     assert result.error is None
 
 
+def test_probe_throughput_measures_download_on_body_server() -> None:
+    server = VlessBodyServer(body_bytes=1 << 20)
+    spec = ThroughputSpec(
+        host="127.0.0.1", port=server.port, path="/1MB.bin", sample_bytes=1 << 20
+    )
+    try:
+        result = real_probe(
+            make_node("tp_ok", server.port, "vless"),
+            timeout_s=1.0,
+            throughput=spec,
+            throughput_timeout_s=12.0,
+        )
+    finally:
+        server.close()
+    assert result.alive is True
+    assert result.throughput_kb_s is not None
+    assert result.throughput_kb_s > 0
+
+
+def test_probe_throughput_none_when_body_never_arrives() -> None:
+    server = VlessNoBodyServer()
+    spec = ThroughputSpec(
+        host="127.0.0.1", port=server.port, path="/1MB.bin", sample_bytes=1 << 20
+    )
+    try:
+        result = real_probe(
+            make_node("tp_empty", server.port, "vless"),
+            timeout_s=1.0,
+            throughput=spec,
+            throughput_timeout_s=0.6,
+        )
+    finally:
+        server.close()
+    assert result.alive is True
+    assert result.throughput_kb_s is None
+
+
 def test_probe_relay_rejects_ws_transport() -> None:
     server = VlessRelayEmulator()
     try:
@@ -877,7 +1000,7 @@ def _run_with_counter(
     in_flight = 0
     lock = threading.Lock()
 
-    def counting_probe(node: Node, timeout_s: float) -> ProbeResult:
+    def counting_probe(node: Node, timeout_s: float, *args, **kwargs) -> ProbeResult:
         nonlocal peak, in_flight
         with lock:
             in_flight += 1

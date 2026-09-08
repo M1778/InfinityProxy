@@ -98,6 +98,26 @@ that means:
 | `INFINITY_HEALTH_INTERVAL_S` | 30 s per-tunnel re-check |
 | `INFINITY_PROBE_BUDGET_PER_REFRESH` | 5000 untested nodes probed per source refresh |
 
+Since [ADR-0008](./adr/0008-throughput-certified-pool.md), admission has a
+second stage: after the relay handshake passes, the probe reads a download from
+a throughput target *through* the node. A node is certified alive only if that
+download delivers at least `INFINITY_THROUGHPUT_MIN_KB_S` — a handshake that
+relays nothing, or a relay slower than the floor, is demoted at admission. The
+measured KiB/s is stored on the node (`throughput_kb_s`), survives the
+handshake-only health loop, and is what the assigner prefers when filling
+tunnels. The throughput stage applies at admission only; the 30s health check
+stays a cheap handshake so the loop never hammers the host link.
+
+Since [ADR-0009](./adr/0009-stability-scored-assignment.md), the engine
+**remembers** these verdicts instead of throwing them away: every admission and
+health verdict accumulates into windowed `probe_ok`/`probe_total` counters on
+the node (`INFINITY_STABILITY_ENABLED`), and assignment ranks candidates by a
+Wilson availability score plus a within-protocol throughput percentile — Tier A
+(reliable) before Tier B before cold — instead of the single last throughput
+snapshot. Latency is still urltest's job at request time; the stability score
+only decides *who gets assigned*. The survival schema details live in
+[architecture.md](./architecture.md#node-pool).
+
 - Candidates queue through the filter in batches of 50; each node has 4s to
   complete a handshake.
 - Each source refresh probes at most `INFINITY_PROBE_BUDGET_PER_REFRESH`

@@ -85,6 +85,93 @@ def test_admit_batch_skips_unknown_nodes() -> None:
     assert store.saved["nd_ghost"].alive is True
 
 
+def test_admit_batch_gate_missing_settings_keeps_handshake_verdicts() -> None:
+    from engine.config import Settings
+
+    good = make_node("nd_g", GOOD_SS)
+    store = FakeProbeBatchStore()
+    store.nodes = {good.node_id: good}
+    batch = {good.node_id: ProbeResult(good.node_id, alive=True, latency_ms=9)}
+    _admit_batch(store, batch)
+    assert store.saved[good.node_id].alive is True
+
+    # A settings-armed gate demotes a node that never delivered a body.
+    gated = FakeProbeBatchStore()
+    gated.nodes = {good.node_id: good}
+    _admit_batch(
+        gated,
+        {good.node_id: ProbeResult(good.node_id, alive=True, throughput_kb_s=None)},
+        settings=Settings(),
+    )
+    assert gated.saved[good.node_id].alive is False
+
+
+def test_admit_batch_demotes_missing_and_slow_throughput() -> None:
+    from engine.config import Settings
+
+    good = make_node("nd_tt", GOOD_SS)
+    slow = make_node("nd_slow", GOOD_SS)
+    settings = Settings(throughput_enabled=True, throughput_min_kb_s=200)
+    store = FakeProbeBatchStore()
+    store.nodes = {good.node_id: good, slow.node_id: slow}
+    batch = {
+        good.node_id: ProbeResult(good.node_id, alive=True, throughput_kb_s=900),
+        slow.node_id: ProbeResult(slow.node_id, alive=True, throughput_kb_s=120),
+    }
+
+    _admit_batch(store, batch, settings)
+
+    assert store.saved[good.node_id].alive is True
+    assert store.saved[slow.node_id].alive is False
+    assert "below floor 200" in store.saved[slow.node_id].error
+
+    node2 = make_node("nd_none", GOOD_SS)
+    store2 = FakeProbeBatchStore()
+    store2.nodes = {node2.node_id: node2}
+    _admit_batch(
+        store2,
+        {node2.node_id: ProbeResult(node2.node_id, alive=True, throughput_kb_s=None)},
+        settings,
+    )
+    assert store2.saved[node2.node_id].alive is False
+    assert "failed throughput certification" in store2.saved[node2.node_id].error
+
+
+def test_admit_batch_records_stability_counters_when_enabled() -> None:
+    from engine.config import Settings
+
+    class RecordingStore(FakeProbeBatchStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stability_flags: list[bool] = []
+
+        def apply_probe_results(
+            self, results: dict[str, ProbeResult], *, stability: bool = False
+        ) -> None:
+            self.stability_flags.append(stability)
+            self.saved.update(results)
+
+    good = make_node("nd_stab", GOOD_SS)
+    on = RecordingStore()
+    on.nodes = {good.node_id: good}
+    _admit_batch(
+        on,
+        {good.node_id: ProbeResult(good.node_id, alive=True, throughput_kb_s=500)},
+        Settings(stability_enabled=True),
+    )
+    assert on.stability_flags == [True]
+    assert on.saved[good.node_id].alive is True
+
+    off = RecordingStore()
+    off.nodes = {good.node_id: good}
+    _admit_batch(
+        off,
+        {good.node_id: ProbeResult(good.node_id, alive=True, throughput_kb_s=500)},
+        Settings(stability_enabled=False),
+    )
+    assert off.stability_flags == [False]
+
+
 def test_pool_store_roundtrip_garbage_node_is_dead() -> None:
     from engine.models import NodeCandidate
 

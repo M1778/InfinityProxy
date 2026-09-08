@@ -18,6 +18,9 @@ interview, and stated no's. Unstated ideas are deliberately not here.
 - Automatic renewal: 30s health checks, swap after 2 strikes, degraded tunnels
   top up to their requested count.
 - SQLite persistence (tunnels + node cache) with boot reconciliation.
+- Stability-scored assignment (Phase 1, [ADR-0009](./docs/adr/0009-stability-scored-assignment.md)): windowed
+  probe counters, Wilson availability + within-protocol speed percentile,
+  Tier A/B/cold ordering, feature-flagged (on in live, off by default).
 - MIT license with upstream attribution (see [docs/scraping.md](./docs/scraping.md)).
 
 ## Post-v1 roadmap
@@ -80,6 +83,14 @@ URI bundle). **Attribution boundary:** this feed is a redistribution of scraped
 data, so it must honor the [source licenses](./docs/scraping.md#attribution),
 including GPL-3.0 obligations from Epodonios. Do not ship until the mechanism is
 designed.
+
+### Stability-scored assignment (phases 2–3)
+Phase 1 (shipped) records and scores what the engine already probes. Phase 2:
+a top-working-set handshake loop so pool coverage does not depend on a node
+being assigned, window folding on `window_started_s`, a freshness decay from
+`last_alive_s`, and tier/availability series in the panel's pool charts.
+Phase 3: tune `INFINITY_STABILITY_WEIGHT_*` / `_MIN_AVAIL` from benchmark-harness
+evidence instead of the conservative defaults.
 
 ### Operational extras (parked)
 - Prometheus-format metrics endpoint for pool/tunnel health.

@@ -9,6 +9,26 @@ from typing import Self
 
 from engine.models import Node, NodeCandidate, ProbeResult, Tunnel
 
+
+def _wilson_sql(ok_expr: str, total_expr: str, z: float = 1.96) -> str:
+    """SQL reproduction of stability.wilson_lower for in-UPDATE score caching.
+
+    Mirrors the Python formula exactly so the cached `score_f` and the
+    read-time Python availability agree (asserted in tests).
+    """
+    z2 = z * z
+    # Leading 1.0 * forces float division: SQLite truncates integer division,
+    # which would zero the point estimate for any probe_ok < probe_total.
+    p = f"(1.0 * ({ok_expr}) / ({total_expr}))"
+    den = f"(1 + {z2} / ({total_expr}))"
+    center = f"({p} + {z2} / (2 * ({total_expr}))) / {den}"
+    half = (
+        f"{z} * SQRT({p} * (1 - {p}) / ({total_expr})"
+        f" + {z2} / (4 * ({total_expr}) * ({total_expr}))) / {den}"
+    )
+    return f"MAX(0.0, {center} - {half})"
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tunnels (
     tunnel_id            TEXT PRIMARY KEY,
@@ -34,7 +54,14 @@ CREATE TABLE IF NOT EXISTS nodes (
     first_seen_s   REAL,
     last_latency_ms INTEGER,
     state          TEXT NOT NULL DEFAULT 'untested',
-    assigned_to    TEXT
+    assigned_to    TEXT,
+    throughput_kb_s INTEGER,
+    probe_ok       INTEGER,
+    probe_total    INTEGER,
+    window_started_s REAL,
+    last_probe_s   REAL,
+    last_alive_s   REAL,
+    score_f        REAL
 );
 
 CREATE TABLE IF NOT EXISTS sources (
@@ -70,7 +97,29 @@ class Store:
     def create_schema(self) -> None:
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        # Column migrations for databases created before a schema change. The
+        # base schema is CREATE TABLE IF NOT EXISTS, so existing rows keep the
+        # pre-change columns until renamed/rebuilt; an additive column is the
+        # cheapest forward-compatible migration and must be additive-only.
+        cols = {
+            r["name"] for r in self._conn.execute("PRAGMA table_info(nodes)").fetchall()
+        }
+        if "throughput_kb_s" not in cols:
+            self._conn.execute("ALTER TABLE nodes ADD COLUMN throughput_kb_s INTEGER")
+        for name, decl in (
+            ("probe_ok", "INTEGER"),
+            ("probe_total", "INTEGER"),
+            ("window_started_s", "REAL"),
+            ("last_probe_s", "REAL"),
+            ("last_alive_s", "REAL"),
+            ("score_f", "REAL"),
+        ):
+            if name not in cols:
+                self._conn.execute(f"ALTER TABLE nodes ADD COLUMN {name} {decl}")
 
     def _row_to_tunnel(self, row: sqlite3.Row) -> Tunnel:
         return Tunnel(
@@ -98,6 +147,13 @@ class Store:
             first_seen_s=row["first_seen_s"],
             last_latency_ms=row["last_latency_ms"],
             state=row["state"],
+            throughput_kb_s=row["throughput_kb_s"],
+            probe_ok=row["probe_ok"] or 0,
+            probe_total=row["probe_total"] or 0,
+            window_started_s=row["window_started_s"],
+            last_probe_s=row["last_probe_s"],
+            last_alive_s=row["last_alive_s"],
+            score_f=row["score_f"],
         )
 
     def save_tunnel(self, t: Tunnel) -> None:
@@ -239,6 +295,7 @@ class Store:
         oldest_first: bool = False,
         query: str | None = None,
         in_use: bool | None = None,
+        order_by_score: bool = False,
     ) -> list[Node]:
         sql = "SELECT * FROM nodes"
         clauses: list[str] = []
@@ -262,7 +319,11 @@ class Store:
             )
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        if oldest_first:
+        if order_by_score:
+            # score_f desc is the availability term (ADR-0009): NULL (cold or
+            # feature-off) rows sort last, then the existing state/latency order.
+            sql += " ORDER BY score_f DESC NULLS LAST, state, last_latency_ms"
+        elif oldest_first:
             sql += " ORDER BY first_seen_s, node_id"
         else:
             sql += " ORDER BY state, last_latency_ms"
@@ -280,13 +341,55 @@ class Store:
             ).fetchone()
         return self._row_to_node(row) if row is not None else None
 
-    def apply_probe_results(self, results: dict[str, ProbeResult]) -> None:
+    def apply_probe_results(
+        self, results: dict[str, ProbeResult], *, stability: bool = False
+    ) -> None:
         with self._lock:
+            now = time.time()
             for node_id, res in results.items():
-                self._conn.execute(
-                    "UPDATE nodes SET state = ?, last_latency_ms = ? WHERE node_id = ?",
-                    ("alive" if res.alive else "dead", res.latency_ms, node_id),
-                )
+                # COALESCE keeps the last non-empty throughput reading when a
+                # handshake-only probe (the 30s health loop) reports None, so a
+                # transient health pass never erases the admission metric.
+                if stability:
+                    # Windowed counters + the cached availability term for every
+                    # verdict the health/admission loops already run (ADR-0009,
+                    # Phase 1: record what we already probe). The old counters
+                    # fold at the window cadence; until then each is +1.
+                    ok_expr = f"COALESCE(probe_ok, 0) + {1 if res.alive else 0}"
+                    total_expr = "COALESCE(probe_total, 0) + 1"
+                    self._conn.execute(
+                        f"""UPDATE nodes SET
+                                state = ?,
+                                last_latency_ms = ?,
+                                throughput_kb_s = COALESCE(?, throughput_kb_s),
+                                probe_ok = {ok_expr},
+                                probe_total = {total_expr},
+                                last_probe_s = ?,
+                                last_alive_s = CASE WHEN ? THEN ? ELSE last_alive_s END,
+                                score_f = {_wilson_sql(ok_expr, total_expr)}
+                            WHERE node_id = ?""",
+                        (
+                            "alive" if res.alive else "dead",
+                            res.latency_ms,
+                            res.throughput_kb_s,
+                            now,
+                            res.alive,
+                            now,
+                            node_id,
+                        ),
+                    )
+                else:
+                    self._conn.execute(
+                        "UPDATE nodes SET state = ?, last_latency_ms = ?, "
+                        "throughput_kb_s = COALESCE(?, throughput_kb_s) "
+                        "WHERE node_id = ?",
+                        (
+                            "alive" if res.alive else "dead",
+                            res.latency_ms,
+                            res.throughput_kb_s,
+                            node_id,
+                        ),
+                    )
             self._conn.commit()
 
     def unassign_node(self, node_id: str) -> None:
@@ -296,7 +399,12 @@ class Store:
             )
             self._conn.commit()
 
-    def pool_counts(self) -> dict[str, int]:
+    def pool_counts(
+        self,
+        *,
+        min_probes: int | None = None,
+        min_avail: float | None = None,
+    ) -> dict[str, int | float | None]:
         with self._lock:
             total = int(self._conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0])
             alive = int(
@@ -320,12 +428,39 @@ class Store:
                     "AND assigned_to IS NOT NULL"
                 ).fetchone()[0]
             )
+            tier_a = tier_b = 0
+            avg_score: float | None = None
+            if min_probes is not None and min_avail is not None:
+                wilson = _wilson_sql(
+                    "COALESCE(probe_ok, 0)", "COALESCE(probe_total, 0)"
+                )
+                probed = "state = 'alive' AND COALESCE(probe_total, 0) >= ?"
+                tier_a = int(
+                    self._conn.execute(
+                        f"SELECT COUNT(*) FROM nodes WHERE {probed} AND {wilson} >= ?",
+                        (min_probes, min_avail),
+                    ).fetchone()[0]
+                )
+                tier_b = int(
+                    self._conn.execute(
+                        f"SELECT COUNT(*) FROM nodes WHERE {probed} AND {wilson} < ?",
+                        (min_probes, min_avail),
+                    ).fetchone()[0]
+                )
+                row = self._conn.execute(
+                    "SELECT AVG(score_f) FROM nodes WHERE state = 'alive'"
+                ).fetchone()
+                if row and row[0] is not None:
+                    avg_score = float(row[0])
         return {
             "total": total,
             "alive": alive,
             "dead": dead,
             "untested": untested,
             "in_use": in_use,
+            "tier_a": tier_a,
+            "tier_b": tier_b,
+            "avg_score": avg_score,
         }
 
     def pool_by_protocol(self) -> list[dict[str, int | str]]:

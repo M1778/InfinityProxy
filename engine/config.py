@@ -24,9 +24,21 @@ class Settings:
     batch_size: int = 50
     probe_timeout_ms: int = 4000
     probe_budget_per_refresh: int = 5000
+    throughput_enabled: bool = True
+    throughput_min_kb_s: int = 200
+    throughput_sample_bytes: int = 1_048_576
+    throughput_timeout_s: float = 12.0
+    throughput_host: str = "speedtest.tele2.net"
+    throughput_port: int = 80
+    throughput_path: str = "/1MB.bin"
     health_interval_s: int = 30
     max_misses: int = 2
     urltest_interval_s: int = 30
+    stability_enabled: bool = False
+    stability_min_probes: int = 6
+    stability_min_avail: float = 0.4
+    stability_weight_avail: float = 0.6
+    stability_weight_speed: float = 0.4
     db_path: str = "infinity.db"
     singbox_image: str = "ghcr.io/sagernet/sing-box:v1.11.6"
     engine_name_prefix: str = "infinity"
@@ -52,9 +64,37 @@ class Settings:
             tunnel_port_end=_env_int("INFINITY_TUNNEL_RANGE_END", int(end_s)),
             batch_size=_env_int("INFINITY_BATCH_SIZE", 50),
             probe_timeout_ms=_env_int("INFINITY_PROBE_TIMEOUT_MS", 4000),
+            throughput_enabled=os.environ.get(
+                "INFINITY_THROUGHPUT_ENABLED", "1"
+            ).lower()
+            not in ("0", "false", "no"),
+            throughput_min_kb_s=_env_int("INFINITY_THROUGHPUT_MIN_KB_S", 200),
+            throughput_sample_bytes=_env_int(
+                "INFINITY_THROUGHPUT_SAMPLE_BYTES", 1048576
+            ),
+            throughput_timeout_s=float(
+                os.environ.get("INFINITY_THROUGHPUT_TIMEOUT_S", "12.0")
+            ),
+            throughput_host=os.environ.get(
+                "INFINITY_THROUGHPUT_HOST", "speedtest.tele2.net"
+            ),
+            throughput_port=_env_int("INFINITY_THROUGHPUT_PORT", 80),
+            throughput_path=os.environ.get("INFINITY_THROUGHPUT_PATH", "/1MB.bin"),
             health_interval_s=_env_int("INFINITY_HEALTH_INTERVAL_S", 30),
             max_misses=_env_int("INFINITY_MAX_MISSES", 2),
             urltest_interval_s=max(10, _env_int("INFINITY_URTEST_INTERVAL_S", 30)),
+            stability_enabled=os.environ.get("INFINITY_STABILITY_ENABLED", "1").lower()
+            not in ("0", "false", "no"),
+            stability_min_probes=_env_int("INFINITY_STABILITY_MIN_PROBES", 6),
+            stability_min_avail=float(
+                os.environ.get("INFINITY_STABILITY_MIN_AVAIL", "0.4")
+            ),
+            stability_weight_avail=float(
+                os.environ.get("INFINITY_STABILITY_WEIGHT_AVAIL", "0.6")
+            ),
+            stability_weight_speed=float(
+                os.environ.get("INFINITY_STABILITY_WEIGHT_SPEED", "0.4")
+            ),
             probe_budget_per_refresh=_env_int(
                 "INFINITY_PROBE_BUDGET_PER_REFRESH", 5000
             ),

@@ -13,6 +13,13 @@ from engine.config import Settings
 from engine.db import Store
 from engine.models import Node, Tunnel
 from engine.scheduler import ASSIGNABLE_PROTOCOLS, Engine
+from engine.stability import (
+    availability,
+    composite_score,
+    score_nodes,
+    speed_percentile_map,
+    tier,
+)
 from engine.tunnel.config import render_config
 from engine.tunnel.container import ContainerController, TunnelRuntimeUnavailable
 
@@ -64,6 +71,25 @@ def create_app(
             return err("invalid_request", "limit must be an integer", 400)
         if limit < 1:
             return err("invalid_request", "limit must be >= 1", 400)
+        sort = request.args.get("sort")
+        min_tier_raw = request.args.get("min_tier")
+        if min_tier_raw is not None and min_tier_raw not in ("A", "B"):
+            return err("invalid_request", "min_tier must be A or B", 400)
+        want_score = sort == "score" or (
+            sort is None and state == "alive" and settings.stability_enabled
+        )
+        if sort == "score" and not settings.stability_enabled:
+            return err(
+                "invalid_request",
+                "sort=score requires INFINITY_STABILITY_ENABLED",
+                400,
+            )
+        if min_tier_raw is not None and not settings.stability_enabled:
+            return err(
+                "invalid_request",
+                "min_tier requires INFINITY_STABILITY_ENABLED",
+                400,
+            )
         nodes = store.load_nodes(
             state=state or None,
             protocols=protocols or None,
@@ -71,11 +97,38 @@ def create_app(
             limit=limit,
             query=query or None,
             in_use=in_use,
+            order_by_score=want_score,
         )
+        if min_tier_raw is not None:
+            allowed = {"A", "B"} if min_tier_raw == "B" else {"A"}
+            nodes = [
+                n
+                for n in nodes
+                if tier(
+                    n,
+                    min_probes=settings.stability_min_probes,
+                    min_avail=settings.stability_min_avail,
+                )
+                in allowed
+            ]
+        if want_score:
+            nodes = score_nodes(
+                nodes,
+                min_probes=settings.stability_min_probes,
+                min_avail=settings.stability_min_avail,
+                weight_avail=settings.stability_weight_avail,
+                weight_speed=settings.stability_weight_speed,
+            )
         in_use_ids = store.node_ids_in_use()
+        percentiles = (
+            speed_percentile_map(nodes) if settings.stability_enabled else None
+        )
         return jsonify(
             {
-                "nodes": [_serialize_node(n, n.node_id in in_use_ids) for n in nodes],
+                "nodes": [
+                    _serialize_node(n, n.node_id in in_use_ids, settings, percentiles)
+                    for n in nodes
+                ],
                 "count": len(nodes),
                 "limit": limit,
             }
@@ -86,7 +139,15 @@ def create_app(
         node = store.get_node(node_id)
         if node is None:
             return err("not_found", f"no node {node_id}", 404)
-        detail = _serialize_node(node, node.node_id in store.node_ids_in_use())
+        if settings.stability_enabled:
+            # Percentile context: the node's own protocol's alive population.
+            cohort = store.load_nodes(state="alive", protocols={node.protocol})
+            percentiles = speed_percentile_map(cohort)
+        else:
+            percentiles = None
+        detail = _serialize_node(
+            node, node.node_id in store.node_ids_in_use(), settings, percentiles
+        )
         detail["uri"] = node.uri
         return jsonify(detail)
 
@@ -107,7 +168,7 @@ def create_app(
 
     @app.get("/tunnels")
     def list_tunnels():
-        tunnels = _serialize_tunnels(store, engine)
+        tunnels = _serialize_tunnels(store, engine, settings)
         return jsonify({"tunnels": tunnels})
 
     @app.post("/tunnels")
@@ -148,7 +209,7 @@ def create_app(
             tuple(sorted(n.node_id for n in nodes)),
             config,
         )
-        return jsonify(_serialize_tunnel(tunnel, store)), 201
+        return jsonify(_serialize_tunnel(tunnel, store, settings)), 201
 
     @app.post("/tunnels/<tunnel_id>/renew")
     def renew_tunnel(tunnel_id: str):
@@ -200,19 +261,22 @@ def create_app(
     return app
 
 
-def _serialize_tunnel(tunnel: Tunnel, store: Store) -> dict[str, Any]:
+def _serialize_tunnel(
+    tunnel: Tunnel, store: Store, settings: Settings | None = None
+) -> dict[str, Any]:
+    assigned = [
+        node
+        for node_id in sorted(store.node_ids_assigned_to(tunnel.tunnel_id))
+        if (node := store.get_node(node_id)) is not None
+    ]
+    percentiles = (
+        speed_percentile_map(assigned)
+        if settings and settings.stability_enabled
+        else None
+    )
     node_rows = []
-    for node_id in sorted(store.node_ids_assigned_to(tunnel.tunnel_id)):
-        node = store.get_node(node_id)
-        if node is None:
-            continue
-        node_rows.append(
-            {
-                "id": node.node_id,
-                "protocol": node.protocol,
-                "latency_ms": node.last_latency_ms,
-            }
-        )
+    for node in assigned:
+        node_rows.append(_serialize_tunnel_node(node, settings, percentiles))
     return {
         "id": tunnel.tunnel_id,
         "host": "127.0.0.1",
@@ -230,10 +294,12 @@ def _serialize_tunnel(tunnel: Tunnel, store: Store) -> dict[str, Any]:
     }
 
 
-def _serialize_tunnels(store: Store, engine: Engine) -> list[dict[str, Any]]:
+def _serialize_tunnels(
+    store: Store, engine: Engine, settings: Settings | None = None
+) -> list[dict[str, Any]]:
     out = []
     for tunnel in store.load_tunnels():
-        item = _serialize_tunnel(tunnel, store)
+        item = _serialize_tunnel(tunnel, store, settings)
         item["health"] = engine.tunnel_health(tunnel)
         out.append(item)
     return out
@@ -247,7 +313,13 @@ def _iso(timestamp: float) -> str:
     )
 
 
-def _serialize_node(node: Node, in_use: bool) -> dict[str, Any]:
+def _serialize_node(
+    node: Node,
+    in_use: bool,
+    settings: Settings | None = None,
+    percentile_map: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    enabled = settings is not None and settings.stability_enabled
     return {
         "id": node.node_id,
         "protocol": node.protocol,
@@ -256,6 +328,45 @@ def _serialize_node(node: Node, in_use: bool) -> dict[str, Any]:
         "source": node.source,
         "state": node.state,
         "last_latency_ms": node.last_latency_ms,
+        "throughput_kb_s": node.throughput_kb_s,
         "in_use": in_use,
         "first_seen_s": _iso(node.first_seen_s),
+        "probe_total": node.probe_total,
+        "availability": availability(node),
+        "tier": (
+            tier(
+                node,
+                min_probes=settings.stability_min_probes,
+                min_avail=settings.stability_min_avail,
+            )
+            if enabled
+            else None
+        ),
+        "score": (
+            composite_score(
+                node,
+                percentile_map or {},
+                min_probes=settings.stability_min_probes,
+                weight_avail=settings.stability_weight_avail,
+                weight_speed=settings.stability_weight_speed,
+            )
+            if enabled
+            else None
+        ),
+    }
+
+
+def _serialize_tunnel_node(
+    node: Node, settings: Settings | None, percentile_map: dict[str, float]
+) -> dict[str, Any]:
+    base = _serialize_node(node, True, settings, percentile_map)
+    return {
+        "id": base["id"],
+        "protocol": base["protocol"],
+        "latency_ms": base["last_latency_ms"],
+        "throughput_kb_s": base["throughput_kb_s"],
+        "availability": base["availability"],
+        "probe_total": base["probe_total"],
+        "tier": base["tier"],
+        "score": base["score"],
     }

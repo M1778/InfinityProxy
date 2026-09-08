@@ -77,9 +77,20 @@ main { max-width: 1200px; margin: 1.2rem auto; padding: 0 1.2rem 3rem; }
 
 /* Charts */
 .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-.chart-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: .9rem; }
+.chart-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: .9rem; font-variant-numeric: tabular-nums; }
 .chart-card.wide { grid-column: 1 / -1; }
 .chart-card canvas { max-height: 260px; }
+#pool-chart { height: 300px; max-height: 320px; }
+#proto-chart { height: 320px; max-height: 360px; }
+.donut-wrap { position: relative; }
+.donut-wrap canvas { display: block; }
+.donut-center {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: .1rem;
+  pointer-events: none;
+}
+.donut-total { font-size: 1.6rem; font-weight: 700; line-height: 1; color: var(--text); }
+.donut-label { font-size: .68rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 
 /* Toolbar + forms */
 .toolbar { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: .7rem .9rem; margin-bottom: 1rem; }
@@ -137,6 +148,7 @@ footer code { font-family: var(--mono); }
   position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
   background: rgba(4, 8, 12, .7); z-index: 50;
 }
+.modal[hidden] { display: none; }
 .modal-box { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1.2rem 1.4rem; max-width: 30rem; width: 90%; }
 .modal-body { margin-bottom: 1rem; font-size: .88rem; overflow-wrap: anywhere; }
 .modal-body pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: .6rem; font-family: var(--mono); font-size: .78rem; white-space: pre-wrap; }

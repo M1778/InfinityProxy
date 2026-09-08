@@ -13,7 +13,7 @@ const state = {
   history: null,        // /api/history columns
   nodes: null,          // last /api/nodes result
   lastSnapAt: 0,
-  panels: { pool: null, tunnel: null, proto: null },
+  panels: { pool: null, tunnel: null, proto: null, donut: null },
 };
 
 /* ---------- live connection ---------- */
@@ -125,75 +125,202 @@ function renderOverview() {
     `<div class="sub">${sub}</div></div>`
   ).join("");
   drawProtocolChart(status.pool && status.pool.by_protocol);
+  drawPoolDonut(status.pool);
   if (state.history) redrawCharts();
 }
 
-function chartTheme() {
+let chartThemeApplied = false;
+function applyChartTheme() {
+  if (chartThemeApplied || !window.Chart) return;
+  chartThemeApplied = true;
+  Chart.defaults.color = "#7d92a5";
+  Chart.defaults.borderColor = "#1e2a35";
+  Chart.defaults.font = { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 11 };
+  Chart.defaults.animation = false;
+  Chart.defaults.scale.grid.color = "#151d26";
+  Chart.defaults.plugins.legend.position = "bottom";
+  Chart.defaults.plugins.legend.labels.usePointStyle = true;
+  Chart.defaults.plugins.legend.labels.boxWidth = 6;
+  Chart.defaults.plugins.legend.labels.color = "#7d92a5";
+  Chart.defaults.plugins.tooltip.backgroundColor = "rgba(16,22,29,.95)";
+  Chart.defaults.plugins.tooltip.borderColor = "#1e2a35";
+  Chart.defaults.plugins.tooltip.borderWidth = 1;
+  Chart.defaults.plugins.tooltip.cornerRadius = 8;
+  Chart.defaults.plugins.tooltip.padding = 10;
+  Chart.defaults.plugins.tooltip.boxPadding = 4;
+  Chart.defaults.plugins.tooltip.usePointStyle = true;
+  Chart.defaults.plugins.tooltip.titleColor = "#d7e2ec";
+  Chart.defaults.plugins.tooltip.bodyColor = "#d7e2ec";
+}
+
+function fmtClock(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function fmtTooltipTitle(items) {
+  return new Date(items[0].parsed.x).toLocaleTimeString();
+}
+
+function pooled(key) {
+  const h = state.history;
+  return (h[key] || []).map((v, i) => ({ x: h.t[i] * 1000, y: v }));
+}
+
+function timeXScale() {
   return {
-    borderColor: "#1e2a35",
-    font: { family: "system-ui, sans-serif", color: "#7d92a5" },
-    grid: { color: "#151d26" },
-    ticks: { color: "#7d92a5" },
-    pointBackgroundColor: "#10161d",
+    type: "linear",
+    ticks: { maxTicksLimit: 8, maxRotation: 0, callback: (v) => fmtClock(v) },
+    grid: { display: false },
+    border: { display: false },
   };
 }
 
 function redrawCharts() {
-  if (!window.Chart) return;
+  if (!window.Chart || !state.history) return;
+  applyChartTheme();
   const h = state.history;
-  const labels = h.t.map((s) => new Date(s * 1000).toLocaleTimeString());
-  const series = (key) => h[key] || [];
+  if (!h.t || !h.t.length) return;
 
-  const poolChart = state.panels.pool || new Chart($("#pool-chart"), {
-    type: "line",
-    data: { labels, datasets: [
-      { label: "alive", data: series("pool_alive"), borderColor: "#34d399", backgroundColor: "rgba(52,211,153,.15)", fill: false, tension: .25 },
-      { label: "in_use", data: series("pool_in_use"), borderColor: "#fbbf24", borderDash: [4, 3], fill: false, tension: .25 },
-      { label: "untested", data: series("pool_untested"), borderColor: "#94a3b8", borderDash: [2, 3], fill: false, tension: .25 },
-      { label: "dead", data: series("pool_dead"), borderColor: "#f87171", borderDash: [2, 3], fill: false, tension: .25 },
-    ]},
-    options: { responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: "nearest" }, scales: { x: { grid: { display: false } } } },
+  if (!state.panels.pool) {
+    state.panels.pool = new Chart($("#pool-chart"), {
+      type: "line",
+      data: { datasets: [
+        { label: "dead", data: pooled("pool_dead"), stack: "pool", fill: true, backgroundColor: "rgba(248,113,113,.18)", borderColor: "#f87171", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+        { label: "untested", data: pooled("pool_untested"), stack: "pool", fill: true, backgroundColor: "rgba(148,163,184,.18)", borderColor: "#94a3b8", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+        { label: "alive", data: pooled("pool_alive"), stack: "pool", fill: true, backgroundColor: "rgba(52,211,153,.18)", borderColor: "#34d399", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+        { label: "in_use", data: pooled("pool_in_use"), stack: "overlay", fill: false, borderColor: "#fbbf24", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+      ]},
+      options: {
+        parsing: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          decimation: { enabled: true, algorithm: "lttb", threshold: 1000, samples: 300 },
+          tooltip: { callbacks: { title: fmtTooltipTitle } },
+        },
+        scales: {
+          x: timeXScale(),
+          y: { beginAtZero: true, stacked: true, border: { display: false }, ticks: { precision: 0, maxTicksLimit: 5 } },
+        },
+      },
+    });
+  }
+  const poolChart = state.panels.pool;
+  ["pool_dead", "pool_untested", "pool_alive", "pool_in_use"].forEach((key, i) => {
+    poolChart.data.datasets[i].data = pooled(key);
   });
-  poolChart.data.labels = labels;
-  poolChart.data.datasets.forEach((ds, i) => { ds.data = [series(["pool_alive", "pool_in_use", "pool_untested", "pool_dead"][i])]; });
   poolChart.update("none");
 
-  const tunnelChart = state.panels.tunnel || new Chart($("#tunnel-chart"), {
-    type: "line",
-    data: { labels, datasets: [
-      { label: "active", data: series("tunnel_active"), borderColor: "#38bdf8", fill: { target: "origin" }, tension: .3 },
-      { label: "degraded", data: series("tunnel_degraded"), borderColor: "#f87171", borderDash: [4, 3], fill: false, tension: .3 },
-    ]},
-    options: { responsive: true, maintainAspectRatio: false, animation: false, scales: { y: { beginAtZero: true, ticks: { precision: 0 } }, x: { grid: { display: false } } } },
-  });
-  tunnelChart.data.labels = labels;
-  tunnelChart.data.datasets[0].data = series("tunnel_active");
-  tunnelChart.data.datasets[1].data = series("tunnel_degraded");
+  if (!state.panels.tunnel) {
+    state.panels.tunnel = new Chart($("#tunnel-chart"), {
+      type: "line",
+      data: { datasets: [
+        { label: "active", data: pooled("tunnel_active"), fill: true, backgroundColor: "rgba(56,189,248,.15)", borderColor: "#38bdf8", borderWidth: 1.5, pointRadius: 0, stepped: true, tension: 0 },
+        { label: "degraded", data: pooled("tunnel_degraded"), fill: false, borderColor: "#f87171", borderWidth: 1, borderDash: [4, 4], pointRadius: 0, stepped: true, tension: 0 },
+      ]},
+      options: {
+        parsing: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: { tooltip: { callbacks: { title: fmtTooltipTitle } } },
+        scales: {
+          x: timeXScale(),
+          y: { beginAtZero: true, border: { display: false }, ticks: { precision: 0, maxTicksLimit: 5 } },
+        },
+      },
+    });
+  }
+  const tunnelChart = state.panels.tunnel;
+  tunnelChart.data.datasets[0].data = pooled("tunnel_active");
+  tunnelChart.data.datasets[1].data = pooled("tunnel_degraded");
   tunnelChart.update("none");
-
-  state.panels.pool = poolChart;
-  state.panels.tunnel = tunnelChart;
 }
 
 function drawProtocolChart(rows) {
   if (!window.Chart || !rows || !rows.length) return;
-  const names = rows.map((r) => r.protocol);
-  const chart = state.panels.proto || new Chart($("#proto-chart"), {
-    type: "bar",
-    data: {
-      labels: names,
-      datasets: [
-        { label: "alive", data: rows.map((r) => r.alive), backgroundColor: "#34d399" },
-        { label: "untested", data: rows.map((r) => r.untested), backgroundColor: "#94a3b8" },
-        { label: "dead", data: rows.map((r) => r.dead), backgroundColor: "#f87171" },
-      ],
-    },
-    options: { responsive: true, maintainAspectRatio: false, animation: false, scales: { x: { stacked: true }, y: { stacked: true } } },
-  });
-  chart.data.labels = names;
-  chart.data.datasets.forEach((ds, i) => { ds.data = rows.map((r) => ({ alive: r.alive, untested: r.untested, dead: r.dead }[["alive", "untested", "dead"][i]])); });
+  applyChartTheme();
+  const sorted = rows.slice().sort((a, b) => (b.total || 0) - (a.total || 0));
+  const labels = sorted.map((r) => r.protocol);
+  const keys = ["alive", "untested", "dead"];
+
+  if (!state.panels.proto) {
+    state.panels.proto = new Chart($("#proto-chart"), {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [
+          { label: "alive", data: sorted.map((r) => r.alive), backgroundColor: "#34d399" },
+          { label: "untested", data: sorted.map((r) => r.untested), backgroundColor: "#94a3b8" },
+          { label: "dead", data: sorted.map((r) => r.dead), backgroundColor: "#f87171" },
+        ],
+      },
+      options: {
+        indexAxis: "y",
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          tooltip: {
+            callbacks: {
+              footer: (items) => {
+                const total = items.reduce((s, it) => s + (it.parsed.x || 0), 0);
+                return `total: ${total} host${total === 1 ? "" : "s"}`;
+              },
+            },
+          },
+        },
+        scales: {
+          x: { stacked: true, beginAtZero: true, border: { display: false }, ticks: { precision: 0 } },
+          y: { stacked: true, grid: { display: false }, border: { display: false }, ticks: { autoSkip: false } },
+        },
+      },
+    });
+  }
+  const chart = state.panels.proto;
+  chart.data.labels = labels;
+  chart.data.datasets.forEach((ds, i) => { ds.data = sorted.map((r) => r[keys[i]]); });
   chart.update("none");
-  state.panels.proto = chart;
+}
+
+function drawPoolDonut(pool) {
+  if (!window.Chart || !pool) return;
+  applyChartTheme();
+  const data = [pool.alive ?? 0, pool.untested ?? 0, pool.dead ?? 0];
+
+  if (!state.panels.donut) {
+    state.panels.donut = new Chart($("#donut-chart"), {
+      type: "doughnut",
+      data: {
+        labels: ["alive", "untested", "dead"],
+        datasets: [{
+          data,
+          backgroundColor: ["#34d399", "#94a3b8", "#f87171"],
+          borderColor: "#10161d",
+          borderWidth: 2,
+          borderRadius: 4,
+          spacing: 2,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: "68%",
+        plugins: { legend: { position: "bottom" } },
+      },
+    });
+  }
+  const chart = state.panels.donut;
+  chart.data.datasets[0].data = data;
+  chart.update("none");
+  const total = pool.total ?? data[0] + data[1] + data[2];
+  const totalEl = $("#donut-total");
+  if (totalEl) totalEl.textContent = total;
+  const inUseEl = $("#donut-inuse");
+  if (inUseEl) inUseEl.textContent = `${pool.in_use ?? 0} in use`;
 }
 
 /* ---------- tunnels view ---------- */
@@ -214,7 +341,7 @@ function renderTunnels() {
       <td class="mono">127.0.0.1:${t.port}</td>
       <td>${t.node_count_granted}/${t.node_count_requested}</td>
       <td>${stateBadge(t.state, t.degraded)}</td>
-      <td class="muted">${esc(health.healthy ? "healthy" : "unhealthy")}${health.dead_swapped_24h ? ` · ${health.dead_swapped_24h} swap` : ""}</td>
+      <td class="muted">${esc(health.healthy ? "healthy" : "unhealthy")}${health.dead_swapped_24h ? ` · ${health.dead_swapped_24h} swap` : ""}${health.restarts_24h ? ` · ${health.restarts_24h} restart` : ""}</td>
       <td>
         <div class="actions">
           <button class="btn sm" data-act="copy" data-creds="${esc(creds)}" title="copy endpoint+credentials">Copy</button>
@@ -297,8 +424,9 @@ function renderNodes() {
     <td>${esc(n.source)}</td>
     <td><span class="badge ${n.state === "alive" ? "ok" : n.state === "dead" ? "dead" : "untested"}">${esc(n.state)}</span></td>
     <td class="mono">${n.last_latency_ms ?? "—"} ms</td>
+    <td class="mono">${n.throughput_kb_s ? Math.round(n.throughput_kb_s) + " KiB/s" : "—"}</td>
     <td>${n.in_use ? '<span class="badge warn">in use</span>' : '<span class="badge idle">free</span>'}</td>
-  </tr>`.trim()).join("") || `<tr><td colspan="7" class="muted">No nodes match the filters.</td></tr>`;
+  </tr>`.trim()).join("") || `<tr><td colspan="8" class="muted">No nodes match the filters.</td></tr>`;
 }
 
 async function nodeDetail(id) {

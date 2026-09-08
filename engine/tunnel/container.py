@@ -71,6 +71,21 @@ class ContainerController:
     def _container_name(self, tunnel_id: str) -> str:
         return f"{self._settings.engine_name_prefix}-{tunnel_id}"
 
+    def is_running(self, tunnel_id: str) -> bool:
+        """True when the tunnel's container exists and is running.
+
+        Used by the scheduler to self-heal a tunnel whose container died but
+        whose restart policy has not brought it back (sing-box exited). The
+        engine state machine keeps the row alive; only the process is missing.
+        """
+        try:
+            container = self.docker.containers.get(self._container_name(tunnel_id))
+        except (_ContainerNotFound, KeyError):
+            return False
+        except _docker_api_error():
+            return False
+        return bool(container.status == "running")
+
     def start(self, tunnel: Tunnel, config: dict) -> None:
         """Spawn the container for a fresh tunnel."""
         self._run(self._container_name(tunnel.tunnel_id), config)

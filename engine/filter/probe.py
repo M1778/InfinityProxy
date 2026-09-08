@@ -63,6 +63,23 @@ _TARGET_PORT = int(os.environ.get("INFINITY_RELAY_TARGET_PORT", "80"))
 
 
 @dataclasses.dataclass(frozen=True)
+class ThroughputSpec:
+    """Download target a probe reaches *through* a relayed node, and how much to read.
+
+    The probe verifies the relay handshake first (the node plus a target digest
+    verify it is a real proxy), then reads `sample_bytes` of that target's body
+    to measure a usable download rate. The choice of host matters: a target with
+    a large plaintext body (the default is a public file server on port 80) lets
+    a slow node reveal itself even when its handshake passes.
+    """
+
+    host: str
+    port: int
+    path: str
+    sample_bytes: int
+
+
+@dataclasses.dataclass(frozen=True)
 class _SSAEADSpec:
     key_len: int
     salt_len: int
@@ -111,7 +128,12 @@ def probeable(node: Node) -> bool:
     return False
 
 
-def probe(node: Node, timeout_s: float) -> ProbeResult:
+def probe(
+    node: Node,
+    timeout_s: float,
+    throughput: ThroughputSpec | None = None,
+    throughput_timeout_s: float = 12.0,
+) -> ProbeResult:
     started = time.monotonic()
     deadline = started + timeout_s
     try:
@@ -123,11 +145,17 @@ def probe(node: Node, timeout_s: float) -> ProbeResult:
                 error=_unprobeable_reason(node),
             )
         if node.protocol in _RELAY_PROTOCOLS:
-            alive, error = _attempt_relay(node, deadline)
+            alive, error, kb_s = _attempt_relay(
+                node, deadline, throughput, throughput_timeout_s
+            )
         elif node.protocol == "ss":
-            alive, error = _attempt_ss_relay(node, deadline)
+            alive, error, kb_s = _attempt_ss_relay(
+                node, deadline, throughput, throughput_timeout_s
+            )
         else:
-            alive, error = _attempt_forward(node, deadline)
+            alive, error, kb_s = _attempt_forward(
+                node, deadline, throughput, throughput_timeout_s
+            )
     except OSError as exc:
         error = (
             "timeout" if isinstance(exc, socket.timeout) else (exc.strerror or str(exc))
@@ -137,6 +165,7 @@ def probe(node: Node, timeout_s: float) -> ProbeResult:
             alive=False,
             latency_ms=_latency_ms(started),
             error=error,
+            throughput_kb_s=None,
         )
     except Exception as exc:  # noqa: BLE001 - never let one bad URI take a batch down
         return ProbeResult(
@@ -144,26 +173,38 @@ def probe(node: Node, timeout_s: float) -> ProbeResult:
             alive=False,
             latency_ms=_latency_ms(started),
             error=f"probe raised: {exc}",
+            throughput_kb_s=None,
         )
     return ProbeResult(
         node_id=node.node_id,
         alive=alive,
         latency_ms=_latency_ms(started),
         error=error,
+        throughput_kb_s=kb_s,
     )
 
 
 # -- v2: per-protocol relay handshakes ----------------------------------------
 
 
-def _attempt_relay(node: Node, deadline: float) -> tuple[bool, str | None]:
+def _attempt_relay(
+    node: Node,
+    deadline: float,
+    throughput: ThroughputSpec | None,
+    throughput_timeout_s: float,
+) -> tuple[bool, str | None, int | None]:
     conf = _relay_config(node)
     raw = socket.create_connection(
         (node.server, node.port), timeout=_remaining(deadline)
     )
+    host = throughput.host.encode("ascii") if throughput else _PATH_TARGET
+    port = throughput.port if throughput else _TARGET_PORT
+    path = throughput.path if throughput else "/"
+    sent = _challenge_for(node.protocol, conf, node, host, port) + (
+        f"GET {path} HTTP/1.0\r\n\r\n".encode("ascii")
+    )
     with raw:
         raw.settimeout(_remaining(deadline))
-        sent = _challenge_for(node.protocol, conf, node) + b"GET / HTTP/1.0\r\n\r\n"
         if conf.tls:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
@@ -171,9 +212,17 @@ def _attempt_relay(node: Node, deadline: float) -> tuple[bool, str | None]:
             with ctx.wrap_socket(raw, server_hostname=conf.sni or node.server) as tls:
                 tls.settimeout(_remaining(deadline))
                 tls.sendall(sent)
-                return _judge(node, tls, sent)
+                alive, error = _judge(node, tls, sent)
+                if alive and throughput is not None:
+                    kb_s = _measure_body(tls, throughput, throughput_timeout_s)
+                    return alive, error, kb_s
+                return alive, error, None
         raw.sendall(sent)
-        return _judge(node, raw, sent)
+        alive, error = _judge(node, raw, sent)
+        if alive and throughput is not None:
+            kb_s = _measure_body(raw, throughput, throughput_timeout_s)
+            return alive, error, kb_s
+        return alive, error, None
 
 
 def _judge(node: Node, conn: socket.socket, sent: bytes) -> tuple[bool, str | None]:
@@ -250,10 +299,40 @@ def _relay_config(node: Node) -> _RelayConfig:
     return _RelayConfig(tls=tls, sni=sni)
 
 
-def _challenge_for(protocol: str, conf: _RelayConfig, node: Node) -> bytes:
+def _challenge_for(
+    protocol: str, conf: _RelayConfig, node: Node, host: bytes, port: int
+) -> bytes:
     if protocol == "trojan":
-        return _trojan_challenge(node, conf, _PATH_TARGET, _TARGET_PORT)
-    return _vless_challenge(node, conf, _PATH_TARGET, _TARGET_PORT)
+        return _trojan_challenge(node, conf, host, port)
+    return _vless_challenge(node, conf, host, port)
+
+
+def _measure_body(
+    conn: socket.socket, throughput: ThroughputSpec, timeout_s: float
+) -> int | None:
+    """Read the target body through the tunnel and return KiB/s.
+
+    Returns None when nothing could be read (the tunnel relayed the response
+    but the body never arrived), so a handshake-honest-but-broken node is not
+    certified as fast. Reads cap at `sample_bytes` / `timeout_s` so a slow node
+    measurably scores low instead of hanging the batch.
+    """
+    start = time.monotonic()
+    deadline = start + timeout_s
+    conn.settimeout(_remaining(deadline))
+    received = 0
+    while received < throughput.sample_bytes:
+        try:
+            chunk = conn.recv(min(65536, throughput.sample_bytes - received))
+        except socket.timeout:
+            break
+        if not chunk:
+            break
+        received += len(chunk)
+    elapsed = time.monotonic() - start
+    if received == 0 or elapsed <= 0:
+        return None
+    return max(0, round(received / 1024 / elapsed))
 
 
 def _vless_challenge(node: Node, conf: _RelayConfig, host: bytes, port: int) -> bytes:
@@ -401,27 +480,37 @@ def _ss_inc_nonce(nonce: bytearray) -> None:
             return
 
 
-def _ss_addr_header() -> bytes:
+def _ss_addr_header(host: bytes = _PATH_TARGET, port: int = _TARGET_PORT) -> bytes:
     return (
         b"\x03"  # ATYP: FQDN (SOCKS5 serializer, sing-box default)
-        + bytes([len(_PATH_TARGET)])
-        + _PATH_TARGET
-        + _TARGET_PORT.to_bytes(2, "big")
+        + bytes([len(host)])
+        + host
+        + port.to_bytes(2, "big")
     )
 
 
-def _attempt_ss_relay(node: Node, deadline: float) -> tuple[bool, str | None]:
+def _attempt_ss_relay(
+    node: Node,
+    deadline: float,
+    throughput: ThroughputSpec | None,
+    throughput_timeout_s: float,
+) -> tuple[bool, str | None, int | None]:
     method, password, _plugin = _ss_params(node)
     spec = _SS_AEAD_SPECS[method]  # probeable() already gated the method
     master = _ss_master_key(password.encode("utf-8"), spec.key_len)
     raw = socket.create_connection(
         (node.server, node.port), timeout=_remaining(deadline)
     )
+    host = throughput.host.encode("ascii") if throughput else _PATH_TARGET
+    port = throughput.port if throughput else _TARGET_PORT
+    path = throughput.path if throughput else "/"
     with raw:
         raw.settimeout(_remaining(deadline))
         salt = os.urandom(spec.salt_len)
         client = spec.aead(_ss_subkey(master, salt, spec.key_len))
-        payload = _ss_addr_header() + b"GET / HTTP/1.0\r\n\r\n"
+        payload = _ss_addr_header(host, port) + (
+            f"GET {path} HTTP/1.0\r\n\r\n".encode("ascii")
+        )
         nonce = bytearray(spec.nonce_len)
         framed = client.encrypt(bytes(nonce), len(payload).to_bytes(2, "big"), None)
         _ss_inc_nonce(nonce)
@@ -430,36 +519,102 @@ def _attempt_ss_relay(node: Node, deadline: float) -> tuple[bool, str | None]:
 
         server_salt = _recvn(raw, spec.salt_len)
         if len(server_salt) < spec.salt_len:
-            return False, (
-                "peer closed before its salt (wrong credentials or non-relay responder)"
+            return (
+                False,
+                "peer closed before its salt "
+                "(wrong credentials or non-relay responder)",
+                None,
             )
         server = spec.aead(_ss_subkey(master, server_salt, spec.key_len))
         nonce = bytearray(spec.nonce_len)
         try:
             head = _recvn(raw, 2 + _SS_TAG_LEN)
             if len(head) < 2 + _SS_TAG_LEN:
-                return False, "peer closed before a length chunk (non-relay responder)"
+                return (
+                    False,
+                    ("peer closed before a length chunk (non-relay responder)"),
+                    None,
+                )
             length = int.from_bytes(server.decrypt(bytes(nonce), head, None), "big")
             _ss_inc_nonce(nonce)
             if length == 0 or length > _SS_MAX_PACKET_SIZE:
-                return False, f"peer chunk length {length} out of range"
+                return False, f"peer chunk length {length} out of range", None
             body = _recvn(raw, length + _SS_TAG_LEN)
             if len(body) < length + _SS_TAG_LEN:
-                return False, "peer closed mid-chunk (non-relay responder)"
+                return False, "peer closed mid-chunk (non-relay responder)", None
             relayed = server.decrypt(bytes(nonce), body, None)
+            _ss_inc_nonce(nonce)
         except InvalidTag:
-            return False, "decrypt failed (wrong credentials or non-relay responder)"
+            return (
+                False,
+                ("decrypt failed (wrong credentials or non-relay responder)"),
+                None,
+            )
     if payload.startswith(relayed):
-        return False, (
-            "server relayed our request bytes back (echo, non-relay responder)"
+        return (
+            False,
+            ("server relayed our request bytes back (echo, non-relay responder)"),
+            None,
         )
     if not _is_successful_http(relayed):
         status = _http_status(relayed)
-        return False, (
-            f"peer answered {relayed[:24]!r} (status {status or 'unknown'}), not "
-            "a relayed 2xx/3xx response from the target (canned-response honeypot)"
+        return (
+            False,
+            (
+                f"peer answered {relayed[:24]!r} (status {status or 'unknown'}), not "
+                "a relayed 2xx/3xx response from the target (canned-response honeypot)"
+            ),
+            None,
         )
-    return True, None
+    if throughput is not None:
+        kb_s = _ss_body_kb(
+            raw, server, nonce, throughput.sample_bytes, throughput_timeout_s
+        )
+        return True, None, kb_s
+    return True, None, None
+
+
+def _ss_body_kb(
+    raw: socket.socket,
+    server: object,
+    nonce: bytearray,
+    sample_bytes: int,
+    timeout_s: float,
+) -> int | None:
+    """Continue reading AEAD chunks past the judge chunk and return KiB/s.
+
+    The first chunk (the HTTP status line) is consumed by the judge; a large
+    download body arrives in further `[AE len][tag][AE payload][tag]` chunks
+    with the nonce counter advanced after every AEAD op. Reads cap at
+    `sample_bytes` / `timeout_s` like `_measure_body`.
+    """
+    start = time.monotonic()
+    deadline = start + timeout_s
+    raw.settimeout(_remaining(deadline))
+    received = 0
+    while received < sample_bytes and time.monotonic() < deadline:
+        try:
+            head = _recvn(raw, 2 + _SS_TAG_LEN)
+        except socket.timeout:
+            break
+        if len(head) < 2 + _SS_TAG_LEN:
+            break
+        try:
+            length = int.from_bytes(server.decrypt(bytes(nonce), head, None), "big")
+            _ss_inc_nonce(nonce)
+            if length == 0 or length > _SS_MAX_PACKET_SIZE:
+                break
+            chunk = _recvn(raw, length + _SS_TAG_LEN)
+            if len(chunk) < length + _SS_TAG_LEN:
+                break
+            received += len(server.decrypt(bytes(nonce), chunk, None))
+            _ss_inc_nonce(nonce)
+        except InvalidTag:
+            break
+    elapsed = time.monotonic() - start
+    if received == 0 or elapsed <= 0:
+        return None
+    return max(0, round(received / 1024 / elapsed))
 
 
 def _recvn(sock: socket.socket, n: int) -> bytes:
@@ -475,39 +630,58 @@ def _recvn(sock: socket.socket, n: int) -> bytes:
 # -- http / socks5 forward-proxy relay round-trips -----------------------------
 
 
-def _attempt_forward(node: Node, deadline: float) -> tuple[bool, str | None]:
+def _attempt_forward(
+    node: Node,
+    deadline: float,
+    throughput: ThroughputSpec | None,
+    throughput_timeout_s: float,
+) -> tuple[bool, str | None, int | None]:
     raw = socket.create_connection(
         (node.server, node.port), timeout=_remaining(deadline)
     )
+    host = throughput.host.encode("ascii") if throughput else _PATH_TARGET
+    port = throughput.port if throughput else _TARGET_PORT
+    path = throughput.path if throughput else "/"
     with raw:
         raw.settimeout(_remaining(deadline))
         if node.protocol == "socks5":
-            alive, error = _socks5_setup(raw, node)
+            alive, error = _socks5_setup(raw, node, host, port)
             if not alive:
-                return False, error
+                return False, error, None
         else:
-            alive, error = _http_connect_setup(raw, node)
+            alive, error = _http_connect_setup(raw, node, host, port)
             if not alive:
-                return False, error
-        sent = b"GET / HTTP/1.0\r\n\r\n"
+                return False, error, None
+        sent = f"GET {path} HTTP/1.0\r\n\r\n".encode("ascii")
         raw.sendall(sent)
         relayed = _recvn(raw, 16)
         if sent.startswith(relayed):
-            return False, (
-                "proxy relayed our request bytes back (echo, non-proxy responder)"
+            return (
+                False,
+                ("proxy relayed our request bytes back (echo, non-proxy responder)"),
+                None,
             )
         if not _is_successful_http(relayed):
             status = _http_status(relayed)
-            return False, (
-                f"peer answered {relayed[:24]!r} (status {status or 'unknown'}), "
-                "not a relayed 2xx/3xx response from the target "
-                "(canned-response honeypot)"
+            return (
+                False,
+                (
+                    f"peer answered {relayed[:24]!r} (status {status or 'unknown'}), "
+                    "not a relayed 2xx/3xx response from the target "
+                    "(canned-response honeypot)"
+                ),
+                None,
             )
-        return True, None
+        if throughput is not None:
+            kb_s = _measure_body(raw, throughput, throughput_timeout_s)
+            return True, None, kb_s
+        return True, None, None
 
 
-def _http_connect_setup(raw: socket.socket, node: Node) -> tuple[bool, str | None]:
-    target = _PATH_TARGET + b":" + str(_TARGET_PORT).encode("ascii")
+def _http_connect_setup(
+    raw: socket.socket, node: Node, host: bytes, port: int
+) -> tuple[bool, str | None]:
+    target = host + b":" + str(port).encode("ascii")
     raw.sendall(b"CONNECT " + target + b" HTTP/1.1\r\nHost: " + target + b"\r\n\r\n")
     resp = _read_until(raw, b"\r\n\r\n")
     status = _http_status(resp)
@@ -516,17 +690,14 @@ def _http_connect_setup(raw: socket.socket, node: Node) -> tuple[bool, str | Non
     return True, None
 
 
-def _socks5_setup(raw: socket.socket, node: Node) -> tuple[bool, str | None]:
+def _socks5_setup(
+    raw: socket.socket, node: Node, host: bytes, port: int
+) -> tuple[bool, str | None]:
     raw.sendall(b"\x05\x01\x00")
     reply = _recvn(raw, 2)
     if reply != b"\x05\x00":
         return False, f"expected socks5 method selection b'\\x05\\x00', got {reply!r}"
-    connect = (
-        b"\x05\x01\x00\x03"
-        + bytes([len(_PATH_TARGET)])
-        + _PATH_TARGET
-        + _TARGET_PORT.to_bytes(2, "big")
-    )
+    connect = b"\x05\x01\x00\x03" + bytes([len(host)]) + host + port.to_bytes(2, "big")
     raw.sendall(connect)
     grant = _recvn(raw, 10)
     if grant[:2] != b"\x05\x00":

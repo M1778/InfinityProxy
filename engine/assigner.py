@@ -11,6 +11,7 @@ from typing import Protocol
 
 from .config import Settings
 from .models import Node, Tunnel
+from .stability import score_nodes
 
 
 class Store(Protocol):
@@ -48,9 +49,18 @@ class PortExhausted(Exception):
     """No free port left in the configured tunnel range."""
 
 
-def _prefer_tested(nodes: list[Node]) -> list[Node]:
-    # Untested alive nodes sort last: a tested node already proved a handshake.
-    return sorted(nodes, key=lambda n: n.last_latency_ms is None)
+def _prefer_best(nodes: list[Node]) -> list[Node]:
+    # Throughput-certified nodes first (pick the best downloaders for the
+    # proxy servers), their fastest first; tested-but-unmeasured next; then
+    # untested alive nodes.
+    return sorted(
+        nodes,
+        key=lambda n: (
+            n.throughput_kb_s is None,
+            -(n.throughput_kb_s or 0),
+            n.last_latency_ms is None,
+        ),
+    )
 
 
 class Assigner:
@@ -77,13 +87,22 @@ class Assigner:
 
     def _free_nodes(self, store: Store, protocols: set[str] | None) -> list[Node]:
         in_use = set(store.node_ids_in_use())
-        return _prefer_tested(
-            [
-                n
-                for n in store.load_nodes(state="alive", protocols=protocols)
-                if n.node_id not in in_use
-            ]
-        )
+        nodes = [
+            n
+            for n in store.load_nodes(state="alive", protocols=protocols)
+            if n.node_id not in in_use
+        ]
+        if self.settings.stability_enabled:
+            # ADR-0009 membership vote: Tier A, then Tier B, then cold nodes,
+            # each ordered by weighted availability + within-protocol speed.
+            return score_nodes(
+                nodes,
+                min_probes=self.settings.stability_min_probes,
+                min_avail=self.settings.stability_min_avail,
+                weight_avail=self.settings.stability_weight_avail,
+                weight_speed=self.settings.stability_weight_speed,
+            )
+        return _prefer_best(nodes)
 
     def assign_new(
         self,

@@ -11,7 +11,7 @@ from dataclasses import replace
 
 from engine.config import Settings
 from engine.db import Store
-from engine.filter.probe import probeable
+from engine.filter.probe import ThroughputSpec, probeable
 from engine.filter.runner import batch_probe
 from engine.models import ProbeResult, SourceManifest
 from engine.scraper import SOURCES, dedup, fetch_text, parse_feed
@@ -28,6 +28,23 @@ def source_by_name(name: str) -> SourceManifest | None:
         if source.name == name:
             return source
     return None
+
+
+def _throughput_spec(settings: Settings) -> ThroughputSpec | None:
+    """The download payload every fresh node is certified against.
+
+    None when throughput certification is disabled, so the health loop and
+    any pool built without it (tests, relay-grade-only deployments) keep the
+    handshake-only probe.
+    """
+    if not settings.throughput_enabled:
+        return None
+    return ThroughputSpec(
+        host=settings.throughput_host,
+        port=settings.throughput_port,
+        path=settings.throughput_path,
+        sample_bytes=settings.throughput_sample_bytes,
+    )
 
 
 def refresh_source(store: Store, settings: Settings, source: SourceManifest) -> None:
@@ -49,9 +66,14 @@ def refresh_source(store: Store, settings: Settings, source: SourceManifest) -> 
     store.record_fetch(source.name, time.time())
 
 
-def _admit_batch(store: Store, batch: dict[str, ProbeResult]) -> None:
-    """Apply one probe batch, demoting nodes the tunnels could never render
-    (docs/scraping.md: a node is only useful if it can become an outbound)."""
+def _admit_batch(
+    store: Store, batch: dict[str, ProbeResult], settings: Settings | None = None
+) -> None:
+    """Apply one probe batch, demoting nodes that could never serve traffic
+    (docs/scraping.md): nodes the tunnels cannot render as an outbound, and
+    nodes whose download fell below the throughput floor. settings from None
+    (tests, caller without a live engine) leaves the gate handshake-only."""
+    gate = settings is not None and settings.throughput_enabled
     for node_id, result in batch.items():
         if not result.alive:
             continue
@@ -62,7 +84,28 @@ def _admit_batch(store: Store, batch: dict[str, ProbeResult]) -> None:
             _outbound_from_node(node)
         except Exception:  # noqa: BLE001 - garbage feed data must not kill the pool
             batch[node_id] = replace(result, alive=False, error="unrenderable")
-    store.apply_probe_results(batch)
+            continue
+        if gate and result.throughput_kb_s is None:
+            batch[node_id] = replace(
+                result,
+                alive=False,
+                error="no usable download (failed throughput certification)",
+            )
+            continue
+        if gate and result.throughput_kb_s is not None:
+            if result.throughput_kb_s < settings.throughput_min_kb_s:
+                batch[node_id] = replace(
+                    result,
+                    alive=False,
+                    error=(
+                        f"download {result.throughput_kb_s} KiB/s below floor "
+                        f"{settings.throughput_min_kb_s} KiB/s"
+                    ),
+                )
+    if settings is not None and settings.stability_enabled:
+        store.apply_probe_results(batch, stability=True)
+    else:
+        store.apply_probe_results(batch)
 
 
 def demote_unrenderable(store: Store) -> int:
@@ -107,7 +150,9 @@ def _probe_new(store: Store, settings: Settings, source: SourceManifest) -> None
         nodes,
         batch_size=settings.batch_size,
         timeout_s=settings.probe_timeout_s,
-        on_batch=lambda batch: _admit_batch(store, batch),
+        throughput=_throughput_spec(settings),
+        throughput_timeout_s=settings.throughput_timeout_s,
+        on_batch=lambda batch: _admit_batch(store, batch, settings),
     )
 
 

@@ -46,6 +46,7 @@ class Engine:
         self._strikes: dict[tuple[str, str], int] = {}
         self._rendered: dict[str, tuple[tuple[str, ...], dict[str, Any]]] = {}
         self._swapped_24h: dict[str, int] = {}
+        self._restarted_24h: dict[str, int] = {}
         self._last_check: dict[str, float] = {}
         self._threads: list[threading.Thread] = []
         self._started_s = time.time()
@@ -137,7 +138,12 @@ class Engine:
                 batch_size=self.settings.batch_size,
                 timeout_s=self.settings.probe_timeout_s,
             )
-            self.store.apply_probe_results(results)
+            # Record windowed availability counters for the 30s health stream
+            # (ADR-0009, Phase 1) before any swap decisions are made on it.
+            if self.settings.stability_enabled:
+                self.store.apply_probe_results(results, stability=True)
+            else:
+                self.store.apply_probe_results(results)
             for node in assigned:
                 key = (tunnel_id, node.node_id)
                 if results[node.node_id].alive:
@@ -171,7 +177,32 @@ class Engine:
 
         if changed:
             self._redeploy(tunnel_id)
+
+        self._self_heal(tunnel_id)
         return swapped, added
+
+    def _self_heal(self, tunnel_id: str) -> None:
+        """Redeploy a tunnel whose container stopped running but whose row is live.
+
+        Health checks catch dead *nodes*, not a dead sing-box inside the tunnel
+        container. The restart policy recovers a crashing process on its own,
+        but a container that has stopped (docker never restarts a *stopped*
+        container, only a *failed* one) leaves the tunnel's listener down while
+        the panel still reports it live. Re-running the last rendered config is
+        cheaper and more honest than reporting the tunnel healthy.
+        """
+        tunnel = self.store.get_tunnel(tunnel_id)
+        if tunnel is None or tunnel.state == "stopped":
+            return
+        try:
+            if self.controller.is_running(tunnel_id):
+                return
+        except TunnelRuntimeUnavailable:
+            logger.warning("docker unreachable; cannot self-heal %s", tunnel_id)
+            return
+        logger.warning("tunnel %s container not running; redeploying", tunnel_id)
+        if self._redeploy(tunnel_id):
+            self._restarted_24h[tunnel_id] = self._restarted_24h.get(tunnel_id, 0) + 1
 
     def _bump_granted(self, tunnel_id: str, delta: int) -> None:
         tunnel = self.store.get_tunnel(tunnel_id)
@@ -181,10 +212,11 @@ class Engine:
         tunnel.state = "running"
         self.store.save_tunnel(tunnel)
 
-    def _redeploy(self, tunnel_id: str) -> None:
+    def _redeploy(self, tunnel_id: str) -> bool:
+        """Redeploy a tunnel's config; True when a new container was rolled."""
         tunnel = self.store.get_tunnel(tunnel_id)
         if tunnel is None:
-            return
+            return False
         ids = self.store.node_ids_assigned_to(tunnel_id)
         nodes = [
             n
@@ -195,12 +227,12 @@ class Engine:
         ]
         signature = tuple(sorted(n.node_id for n in nodes))
         if not signature:
-            return
+            return False
         if (
             self._rendered.get(tunnel_id, ("", None))[0] == signature
             and (self._rendered[tunnel_id][1])
         ):
-            return
+            return False
         config = render_config(
             tunnel, nodes, urltest_interval_s=self.settings.urltest_interval_s
         )
@@ -208,8 +240,9 @@ class Engine:
             self.controller.update(tunnel_id, config)
         except TunnelRuntimeUnavailable:
             logger.warning("docker unreachable; tunnel %s not redeployed", tunnel_id)
-            return
+            return False
         self._rendered[tunnel_id] = (signature, config)
+        return True
 
     def _source_loop(self) -> None:
         while not self._stop.is_set():
@@ -248,7 +281,13 @@ class Engine:
     def engine_status(self) -> dict[str, Any]:
         summaries = {s["name"]: s for s in self.store.sources_summary()}
         now = time.time()
-        pool = self.store.pool_counts()
+        if self.settings.stability_enabled:
+            pool = self.store.pool_counts(
+                min_probes=self.settings.stability_min_probes,
+                min_avail=self.settings.stability_min_avail,
+            )
+        else:
+            pool = self.store.pool_counts()
         tunnels = self.store.load_tunnels()
         stale = 0
         sources = []
@@ -274,6 +313,9 @@ class Engine:
                 "dead": pool["dead"],
                 "untested": pool["untested"],
                 "in_use": pool["in_use"],
+                "tier_a": pool["tier_a"],
+                "tier_b": pool["tier_b"],
+                "avg_score": pool["avg_score"],
                 "by_protocol": self.store.pool_by_protocol(),
                 "assignable": sum(
                     1
@@ -298,4 +340,5 @@ class Engine:
         return {
             "last_check_s": int(time.time() - last) if last else None,
             "dead_swapped_24h": self._swapped_24h.get(tunnel.tunnel_id, 0),
+            "restarts_24h": self._restarted_24h.get(tunnel.tunnel_id, 0),
         }

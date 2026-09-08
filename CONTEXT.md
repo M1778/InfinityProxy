@@ -46,8 +46,10 @@ with fresh alive nodes from the pool. Performed continuously (every 30s) when
 _Avoid_: "refresh" (reserved for fetching), "restart" (container mechanics)
 
 **Alive / Dead (node states)**:
-Alive = passed a real protocol handshake within the probe timeout. Dead = failed,
-and therefore excluded from assignment and swapped out of tunnels.
+Alive = passed a real protocol handshake within the probe timeout, and — at
+admission, since ADR-0008 — delivered enough of a throughput sample through the
+tunnel to meet `INFINITY_THROUGHPUT_MIN_KB_S`. Dead = failed, and therefore
+excluded from assignment and swapped out of tunnels.
 _Avoid_: "working", "online"
 
 **Alive check (liveness probe)**:
@@ -78,6 +80,28 @@ Epodonios 5 min, v2rayfree 6 h, gfpcom 30 min, FreeFolksOn 10 min).
 Collapsing duplicate nodes across feeds on their identity key (`server:port`,
 plus user/uuid where the protocol requires), keeping first-seen source as the
 attribution record.
+
+## Stability / scoring terms
+
+**Availability**:
+The Wilson lower bound (`z = 1.96`) over a node's windowed probe verdicts
+(`probe_ok` / `probe_total`). Small samples are blended toward the mean, so a
+2/2 node never outranks a 95/100 node. Cached on the row as `score_f`.
+
+**Tier (A / B)**:
+The membership grade of a node with enough verdicts to judge: **A** = evaluated
+and at/above the availability floor, **B** = evaluated below it. Assignment
+orders Tier A first, then B, then cold nodes.
+
+**Cold (node)**:
+Fewer than `INFINITY_STABILITY_MIN_PROBES` verdicts — not yet judgeable. Cold
+nodes contribute no availability term and sort after every evaluated node, but
+stay assignable under pool starvation so a fresh pool can still fill tunnels.
+
+**Stability score**:
+`0.6 · availability + 0.4 · within-protocol throughput percentile`, computed at
+assignment time over the candidate set. Latency is deliberately absent: sing-box
+`urltest` owns request-time latency (ADR-0005); the score is a membership vote.
 
 ## Interface terms
 

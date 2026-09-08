@@ -42,10 +42,16 @@ Public feeds ─────► │  Scraper loop ─► Node pool ─► Livene
   [docs/scraping.md](./scraping.md)).
 - **Node pool** — in-memory working set of nodes that passed the liveness
   filter, persisted as a cache in SQLite for warm starts.
-- **Liveness filter** — probes nodes with a real protocol handshake, batched and
-  time-boxed (default batch 50, 4s timeout). Verdicts are written to the store
-  batch-by-batch, so alive nodes surface while a full source pass still runs.
-- **Assigner** — hands each new tunnel an exclusive private set of alive nodes.
+- **Liveness filter** — probes nodes with a real protocol handshake (plus a
+  throughput certification at admission, [ADR-0008](./adr/0008-throughput-certified-pool.md)),
+  batched and time-boxed (default batch 50, 4s timeout). Verdicts are written to
+  the store batch-by-batch, so alive nodes surface while a full source pass
+  still runs. Since [ADR-0009](./adr/0009-stability-scored-assignment.md) each
+  verdict also accumulates into the node's windowed probe counters.
+- **Assigner** — hands each new tunnel an exclusive private set of alive nodes;
+  with stability enabled it orders candidates Tier A (reliable) → B → cold by a
+  Wilson availability + within-protocol speed score
+  ([ADR-0009](./adr/0009-stability-scored-assignment.md)).
 - **Control API** — Flask REST endpoints on `127.0.0.1:8787` (see
   [docs/api.md](./api.md)). `GET /` redirects to the panel.
 - **Panel** — a second Flask process (`python -m panel`) on `127.0.0.1:8000`
@@ -93,7 +99,10 @@ A single SQLite file (default `infinity.db`) on a Docker volume persists:
 
 - **tunnels** — id, state, port, credentials, `node_count` requested/granted,
   `auto_renew` flag, timestamps,
-- **node cache** — node URIs, source, last-seen, last latency, assignment.
+- **node cache** — node URIs, source, last-seen, last latency, certified
+  throughput (KiB/s), assignment, and (since ADR-0009) the windowed probe
+  counters `probe_ok`/`probe_total` plus `last_probe_s`/`last_alive_s`,
+  `window_started_s`, and the cached availability term `score_f`.
 
 Raw scrape batches are ephemeral. On boot the Engine loads this state and
 **reconciles**: it adopts containers whose config still matches, and stops
@@ -141,9 +150,17 @@ sequenceDiagram
 - Each tunnel with `auto_renew=true` is health-checked every **30s**.
 - A node is probed with its own protocol handshake. After **2 consecutive
   failures** the node is marked dead and swapped.
-- The swap draws from the node pool (preferring nodes already tested alive and,
-  where possible, not previously failed for this tunnel — see
-  [ROADMAP](../ROADMAP.md) for the stricter avoidance goals).
+- The swap draws from the node pool, preferring nodes already certified alive —
+  and since [ADR-0008](./adr/0008-throughput-certified-pool.md), the nodes with
+  the highest certified throughput. With stability enabled
+  ([ADR-0009](./adr/0009-stability-scored-assignment.md)) the preference is the
+  stability score instead: reliable Tier-A nodes first, by availability +
+  within-protocol throughput percentile — and, where possible, not previously
+  failed for this tunnel (see [ROADMAP](../ROADMAP.md) for the stricter
+  avoidance goals).
+- The health pass also **self-heals the container**: if the tunnel row is live
+  but its container is no longer running, the engine redeploys it from the
+  store and counts the event in `tunnel_health.restarts_24h`.
 - Sources refetch on their own cadence (5 min–6 h), so the pool constantly
   replenishes with fresh candidates.
 
@@ -185,6 +202,7 @@ InfinityProxy/
 │   ├── scraper/              #   per-source fetchers + parsers
 │   ├── filter/               #   liveness probing, batch logic
 │   ├── assigner.py           #   exclusive node allocation
+│   ├── stability.py          #   ADR-0009 scoring: wilson_lower, tiers, percentiles
 │   ├── tunnel/               #   sing-box config rendering + container control
 │   └── db.py                 #   SQLite access
 ├── panel/                    # Flask web dashboard
@@ -211,3 +229,5 @@ Relevant architecture decision records:
 - [0005 Latency-weighted rotation](./adr/0005-latency-weighted-rotation.md)
 - [0006 Certified liveness v2 (probe policy)](./adr/0006-relay-grade-liveness-probes.md)
 - [0007 Web panel (localhost, unauthenticated)](./adr/0007-web-panel.md)
+- [0008 Throughput-certified pool](./adr/0008-throughput-certified-pool.md)
+- [0009 Stability-scored assignment](./adr/0009-stability-scored-assignment.md)

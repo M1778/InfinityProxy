@@ -13,7 +13,12 @@ from engine.models import Node, Tunnel
 
 
 def make_node(
-    node_id: str, state: str = "alive", latency_ms: int | None = None
+    node_id: str,
+    state: str = "alive",
+    latency_ms: int | None = None,
+    throughput_kb_s: int | None = None,
+    probe_ok: int = 0,
+    probe_total: int = 0,
 ) -> Node:
     return Node(
         node_id=node_id,
@@ -26,6 +31,9 @@ def make_node(
         first_seen_s=1.0,
         last_latency_ms=latency_ms,
         state=state,
+        throughput_kb_s=throughput_kb_s,
+        probe_ok=probe_ok,
+        probe_total=probe_total,
     )
 
 
@@ -97,6 +105,18 @@ class FakeStore:
 
 def tiny_settings() -> Settings:
     return Settings(tunnel_port_start=20000, tunnel_port_end=20003)
+
+
+def stability_settings() -> Settings:
+    return Settings(
+        tunnel_port_start=20000,
+        tunnel_port_end=20003,
+        stability_enabled=True,
+        stability_min_probes=6,
+        stability_min_avail=0.4,
+        stability_weight_avail=0.6,
+        stability_weight_speed=0.4,
+    )
 
 
 def test_allocate_port_returns_lowest_free():
@@ -186,6 +206,66 @@ def test_assign_new_prefers_tested_nodes_over_untested():
     granted = assigner.assign_new(store, "t1", requested=2)
 
     assert [n.node_id for n in granted] == ["tested1", "tested2"]
+
+
+def test_assign_new_prefers_fastest_throughput_first():
+    assigner = Assigner(tiny_settings())
+    store = FakeStore()
+    store.add_node(make_node("fast", latency_ms=300, throughput_kb_s=1500))
+    store.add_node(make_node("slow", latency_ms=10, throughput_kb_s=220))
+    store.add_node(make_node("unknown", latency_ms=120, throughput_kb_s=None))
+    store.add_node(make_node("untested", latency_ms=None, throughput_kb_s=None))
+
+    granted = assigner.assign_new(store, "t1", requested=3)
+
+    assert [n.node_id for n in granted] == ["fast", "slow", "unknown"]
+
+
+def test_assign_new_stability_prefers_proven_slow_over_flappy_fast():
+    assigner = Assigner(stability_settings())
+    store = FakeStore()
+    store.add_node(
+        make_node("proven", throughput_kb_s=300, probe_ok=90, probe_total=100)
+    )
+    store.add_node(
+        make_node("flappy", throughput_kb_s=5000, probe_ok=1, probe_total=10)
+    )
+
+    granted = assigner.assign_new(store, "t1", requested=2)
+
+    assert [n.node_id for n in granted] == ["proven", "flappy"]
+
+
+def test_assign_new_stability_feature_off_keeps_legacy_order():
+    # Same nodes, feature flag off (Settings() default): the single throughput
+    # measurement still dominates, exactly as before ADR-0009.
+    assigner = Assigner(tiny_settings())
+    store = FakeStore()
+    store.add_node(
+        make_node("proven", throughput_kb_s=300, probe_ok=90, probe_total=100)
+    )
+    store.add_node(
+        make_node("flappy", throughput_kb_s=5000, probe_ok=1, probe_total=10)
+    )
+
+    granted = assigner.assign_new(store, "t1", requested=2)
+
+    assert [n.node_id for n in granted] == ["flappy", "proven"]
+
+
+def test_assign_new_stability_cold_node_never_outranks_evaluated():
+    assigner = Assigner(stability_settings())
+    store = FakeStore()
+    # Two flawless fresh probes (cold, probe_total 2 < min_probes) but a huge
+    # download: must still never outrank a node with a probe history.
+    store.add_node(make_node("cold", throughput_kb_s=9000, probe_ok=2, probe_total=2))
+    store.add_node(
+        make_node("evaluated", throughput_kb_s=1, probe_ok=20, probe_total=100)
+    )
+
+    granted = assigner.assign_new(store, "t1", requested=2)
+
+    assert [n.node_id for n in granted] == ["evaluated", "cold"]
 
 
 def test_top_up_adds_only_new_nodes_and_reaches_target():

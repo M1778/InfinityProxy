@@ -64,6 +64,13 @@ class Node:
     first_seen_s: float
     last_latency_ms: int | None = None
     state: str = "untested"
+    throughput_kb_s: int | None = None
+    probe_ok: int = 0
+    probe_total: int = 0
+    window_started_s: float | None = None
+    last_probe_s: float | None = None
+    last_alive_s: float | None = None
+    score_f: float | None = None
 
     @classmethod
     def from_candidate(cls, c: NodeCandidate) -> "Node":
@@ -90,6 +97,7 @@ class ProbeResult:
     alive: bool
     latency_ms: int | None = None
     error: str | None = None
+    throughput_kb_s: int | None = None
 
 
 @dataclass

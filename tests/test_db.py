@@ -52,11 +52,101 @@ def test_schema_creation_and_idempotence(store: Store) -> None:
         "dead": 0,
         "in_use": 0,
         "untested": 0,
+        "tier_a": 0,
+        "tier_b": 0,
+        "avg_score": None,
     }
     assert store.sources_summary() == []
     store.create_schema()
     store.create_schema()
     assert store.tunnel_count() == 0
+
+
+_OLD_SCHEMA = """
+CREATE TABLE tunnels (
+    tunnel_id            TEXT PRIMARY KEY,
+    state                TEXT,
+    port                 INTEGER UNIQUE,
+    username             TEXT,
+    password             TEXT,
+    node_count_requested INTEGER,
+    node_count_granted   INTEGER,
+    auto_renew           INTEGER,
+    created_at_s         REAL,
+    updated_at_s         REAL
+);
+CREATE TABLE nodes (
+    node_id        TEXT PRIMARY KEY,
+    uri            TEXT,
+    protocol       TEXT,
+    server         TEXT,
+    port           INTEGER,
+    user           TEXT,
+    source         TEXT,
+    first_seen_s   REAL,
+    last_latency_ms INTEGER,
+    state          TEXT NOT NULL DEFAULT 'untested',
+    assigned_to    TEXT
+);
+CREATE TABLE sources (
+    name         TEXT PRIMARY KEY,
+    name_scm     TEXT,
+    last_fetch_s REAL,
+    next_fetch_s REAL
+);
+"""
+
+
+def test_create_schema_migrates_pre_throughput_databases(tmp_path) -> None:
+    path = str(tmp_path / "legacy.db")
+    import sqlite3
+
+    with sqlite3.connect(path) as conn:
+        conn.executescript(_OLD_SCHEMA)
+        conn.execute(
+            "INSERT INTO nodes (node_id, uri, protocol, server, port, user, "
+            "source, first_seen_s, last_latency_ms, state) "
+            "VALUES ('nd_old', 'vless://x@1.2.3.4:443', 'vless', '1.2.3.4', 443, "
+            "'x', 'legacy', 1000.0, 42, 'alive')"
+        )
+        conn.commit()
+
+    store = Store(path)
+    try:
+        store.create_schema()  # IF NOT EXISTS is a no-op, the ALTER must add the column
+        node = store.get_node("nd_old")
+        assert node is not None
+        assert node.last_latency_ms == 42
+        assert node.throughput_kb_s is None  # migrated column defaults to NULL
+
+        store.apply_probe_results(
+            {"nd_old": ProbeResult("nd_old", True, latency_ms=50, throughput_kb_s=900)}
+        )
+        assert store.get_node("nd_old").throughput_kb_s == 900
+    finally:
+        store.close()
+
+
+def test_apply_probe_results_preserves_throughput_on_handshake_only_pass(
+    store: Store,
+) -> None:
+    store.upsert_candidates([make_candidate(source="a")])
+    node = store.load_nodes()[0]
+    store.apply_probe_results(
+        {
+            node.node_id: ProbeResult(
+                node.node_id, True, latency_ms=40, throughput_kb_s=810
+            )
+        }
+    )
+    assert store.get_node(node.node_id).throughput_kb_s == 810
+
+    # The 30s health loop probes without a download: throughput must not erase.
+    store.apply_probe_results(
+        {node.node_id: ProbeResult(node.node_id, True, latency_ms=60)}
+    )
+    assert store.get_node(node.node_id).throughput_kb_s == 810
+    assert store.get_node(node.node_id).last_latency_ms == 60
 
 
 def test_save_list_get_delete_tunnel(store: Store) -> None:
@@ -296,11 +386,162 @@ def test_pool_counts(store: Store) -> None:
         "dead": 1,
         "in_use": 0,
         "untested": 2,
+        "tier_a": 0,
+        "tier_b": 0,
+        "avg_score": None,
     }
 
     store.assign_nodes([alive_ids, dead_id, untested_id], "tu_a")
     assert store.pool_counts()["in_use"] == 1
     assert store.pool_counts()["total"] == 4
+
+
+def test_pool_by_protocol_groups_counts(store: Store) -> None:
+    store.upsert_candidates(
+        [
+            make_candidate(source="a"),
+            NodeCandidate(
+                uri="ss://x@5.6.7.8:8388",
+                protocol="ss",
+                server="5.6.7.8",
+                port=8388,
+                user="x",
+                source="b",
+            ),
+            NodeCandidate(
+                uri="ss://y@9.9.9.9:8388",
+                protocol="ss",
+                server="9.9.9.9",
+                port=8388,
+                user="y",
+                source="c",
+            ),
+            make_candidate(source="d", server="8.8.8.8"),
+        ]
+    )
+    nodes = store.load_nodes()
+    store.apply_probe_results(
+        {
+            n.node_id: ProbeResult(
+                n.node_id, alive=n.server != "8.8.8.8", latency_ms=10
+            )
+            for n in nodes
+        }
+    )
+
+    by = {p["protocol"]: p for p in store.pool_by_protocol()}
+    assert set(by) == {"vless", "ss"}
+    assert by["vless"] == {
+        "protocol": "vless",
+        "total": 2,
+        "alive": 1,
+        "dead": 1,
+        "untested": 0,
+    }
+    assert by["ss"] == {
+        "protocol": "ss",
+        "total": 2,
+        "alive": 2,
+        "dead": 0,
+        "untested": 0,
+    }
+
+
+def test_load_nodes_default_ordering_state_then_latency(store: Store) -> None:
+    store.upsert_candidates(
+        [
+            make_candidate(source="a", server="1.1.1.1"),
+            make_candidate(source="b", server="2.2.2.2"),
+            make_candidate(source="c", server="3.3.3.3"),
+            make_candidate(source="d", server="4.4.4.4"),
+        ]
+    )
+    nodes = store.load_nodes()
+    results = {}
+    for n in nodes:
+        if n.server == "4.4.4.4":
+            results[n.node_id] = ProbeResult(n.node_id, alive=True, latency_ms=5)
+        elif n.server == "2.2.2.2":
+            results[n.node_id] = ProbeResult(n.node_id, alive=True, latency_ms=300)
+        elif n.server == "1.1.1.1":
+            results[n.node_id] = ProbeResult(n.node_id, alive=False)
+    store.apply_probe_results(results)
+
+    order = store.load_nodes()
+    assert [n.state for n in order] == ["alive", "alive", "dead", "untested"]
+    alive = [n for n in order if n.state == "alive"]
+    assert [n.server for n in alive] == ["4.4.4.4", "2.2.2.2"]
+    assert [n.last_latency_ms for n in alive] == [5, 300]
+
+
+def test_load_nodes_query_matches_host_or_node_id(store: Store) -> None:
+    store.upsert_candidates([make_candidate(source="a", server="free-node.example")])
+    node = store.load_nodes()[0]
+    assert len(store.load_nodes(query="FREE-NODE")) == 1
+    assert len(store.load_nodes(query="node.example")) == 1
+    assert len(store.load_nodes(query=node.node_id)) == 1
+    assert len(store.load_nodes(query="NO-SUCH")) == 0
+
+
+def test_load_nodes_in_use_filter(store: Store) -> None:
+    store.upsert_candidates(
+        [
+            make_candidate(source="a"),
+            make_candidate(
+                source="b", server="5.6.7.8", uri="vless://abc@5.6.7.8:443#z"
+            ),
+        ]
+    )
+    nodes = store.load_nodes()
+    store.assign_nodes([nodes[0].node_id], "tu_a")
+
+    assert {n.node_id for n in store.load_nodes(in_use=True)} == {nodes[0].node_id}
+    assert {n.node_id for n in store.load_nodes(in_use=False)} == {nodes[1].node_id}
+    assert len(store.load_nodes(in_use=None)) == 2
+    assert store.node_ids_in_use() == {nodes[0].node_id}
+
+
+def test_load_nodes_limit_applies_after_filters(store: Store) -> None:
+    store.upsert_candidates(
+        [
+            make_candidate(source="a"),
+            NodeCandidate(
+                uri="ss://x@5.6.7.8:8388",
+                protocol="ss",
+                server="5.6.7.8",
+                port=8388,
+                user="x",
+                source="b",
+            ),
+            make_candidate(source="c", server="8.8.8.8"),
+            NodeCandidate(
+                uri="ss://y@9.9.9.9:8388",
+                protocol="ss",
+                server="9.9.9.9",
+                port=8388,
+                user="y",
+                source="d",
+            ),
+        ]
+    )
+    assert len(store.load_nodes(protocols={"ss"})) == 2
+    assert len(store.load_nodes(protocols={"ss"}, limit=1)) == 1
+    assert len(store.load_nodes(state="untested", limit=3)) == 3
+    assert len(store.load_nodes(oldest_first=True, limit=2)) == 2
+
+
+def test_record_fetch_unknown_source_is_noop(store: Store) -> None:
+    store.upsert_source("ebrasha", "ebrasha/ebrasha")
+    store.record_fetch("ebrasha", 123.0)
+    store.record_fetch("not-seen", 999.0)
+    entries = {e["name"]: e for e in store.sources_summary()}
+    assert set(entries) == {"ebrasha"}
+    assert entries["ebrasha"]["last_fetch_s"] == 123.0
+    assert entries["ebrasha"]["next_fetch_s"] is None
+
+
+def test_get_node_missing_returns_none(store: Store) -> None:
+    assert store.get_node("nope") is None
 
 
 def test_sources_ledger(store: Store) -> None:
@@ -335,3 +576,101 @@ def test_context_manager(tmp_path) -> None:
         store.create_schema()
         store.save_tunnel(make_tunnel("a", 10001))
         assert store.get_tunnel("tu_a") is not None
+
+
+def test_create_schema_migrates_pre_stability_databases(tmp_path) -> None:
+    path = str(tmp_path / "legacy.db")
+    with sqlite3.connect(path) as conn:
+        conn.executescript(_OLD_SCHEMA)
+        conn.commit()
+
+    store = Store(path)
+    try:
+        store.create_schema()
+        cols = {
+            r[1] for r in store._conn.execute("PRAGMA table_info(nodes)").fetchall()
+        }
+        assert {
+            "probe_ok",
+            "probe_total",
+            "window_started_s",
+            "last_probe_s",
+            "last_alive_s",
+            "score_f",
+        } <= cols
+
+        store.upsert_candidates([make_candidate(source="legacy")])
+        node = store.load_nodes()[0]
+        assert node.probe_ok == 0
+        assert node.probe_total == 0
+        assert node.score_f is None
+    finally:
+        store.close()
+
+
+def test_apply_probe_results_score_f_matches_wilson(store: Store) -> None:
+    from engine.stability import wilson_lower
+
+    store.upsert_candidates([make_candidate(source="a")])
+    node = store.load_nodes()[0]
+
+    # Three distinct probe events on the same node, accumulated windowed.
+    for alive in (True, True, False):
+        store.apply_probe_results(
+            {node.node_id: ProbeResult(node.node_id, alive=alive, latency_ms=10)},
+            stability=True,
+        )
+
+    got = store.get_node(node.node_id)
+    assert got.probe_total == 3
+    assert got.probe_ok == 2
+    assert got.state == "dead"
+    assert got.last_probe_s is not None
+    assert got.last_alive_s is not None  # set by the two alive probes
+    assert got.score_f is not None
+    assert got.score_f == pytest.approx(wilson_lower(2, 3))
+
+
+def test_apply_probe_results_feature_off_leaves_counters_null(store: Store) -> None:
+    store.upsert_candidates([make_candidate(source="a")])
+    node = store.load_nodes()[0]
+
+    store.apply_probe_results(
+        {node.node_id: ProbeResult(node.node_id, alive=True, latency_ms=10)}
+    )
+
+    got = store.get_node(node.node_id)
+    assert got.state == "alive"
+    assert got.probe_total == 0
+    assert got.score_f is None
+
+
+def test_pool_counts_tiers_and_avg_score(store: Store) -> None:
+    from engine.stability import wilson_lower
+
+    store.upsert_candidates(
+        [
+            make_candidate(source="a", server="1.1.1.1"),
+            make_candidate(source="b", server="2.2.2.2"),
+            make_candidate(source="c", server="3.3.3.3"),
+        ]
+    )
+    nodes = {n.server: n for n in store.load_nodes()}
+
+    for server, ok, total in (("1.1.1.1", 90, 100), ("2.2.2.2", 20, 100)):
+        store._conn.execute(
+            "UPDATE nodes SET state = 'alive', probe_ok = ?, probe_total = ?, "
+            "score_f = ? WHERE node_id = ?",
+            (ok, total, wilson_lower(ok, total), nodes[server].node_id),
+        )
+    store._conn.commit()
+
+    counts = store.pool_counts(min_probes=6, min_avail=0.4)
+    assert counts["tier_a"] == 1  # 1.1.1.1: avail 0.90 >= 0.4
+    assert counts["tier_b"] == 1  # 2.2.2.2: avail ~0.13 < 0.4
+    assert counts["avg_score"] == pytest.approx(
+        (wilson_lower(90, 100) + wilson_lower(20, 100)) / 2
+    )
+
+    # Cold (third) node has no counters; unevaluated alive nodes are in neither tier.
+    assert counts["tier_a"] + counts["tier_b"] == 2

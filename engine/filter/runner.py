@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from engine.models import Node, ProbeResult
 
-from .probe import probe
+from .probe import ThroughputSpec, probe
 
 
 def batch_probe(
@@ -17,6 +17,8 @@ def batch_probe(
     timeout_s: float = 4.0,
     max_workers: int | None = None,
     on_batch: Callable[[dict[str, ProbeResult]], None] | None = None,
+    throughput: ThroughputSpec | None = None,
+    throughput_timeout_s: float = 12.0,
 ) -> dict[str, ProbeResult]:
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1")
@@ -26,7 +28,10 @@ def batch_probe(
         chunk = nodes[start : start + batch_size]
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(_probe_one, node, timeout_s): node.node_id for node in chunk
+                pool.submit(
+                    _probe_one, node, timeout_s, throughput, throughput_timeout_s
+                ): node.node_id
+                for node in chunk
             }
             for future, node_id in futures.items():
                 results[node_id] = future.result()
@@ -43,9 +48,14 @@ def batch_probe(
     return results
 
 
-def _probe_one(node: Node, timeout_s: float) -> ProbeResult:
+def _probe_one(
+    node: Node,
+    timeout_s: float,
+    throughput: ThroughputSpec | None,
+    throughput_timeout_s: float,
+) -> ProbeResult:
     try:
-        return probe(node, timeout_s)
+        return probe(node, timeout_s, throughput, throughput_timeout_s)
     except Exception as exc:  # noqa: BLE001 - a probe failure must never take a batch down
         return ProbeResult(
             node_id=node.node_id, alive=False, error=f"probe raised: {exc}"

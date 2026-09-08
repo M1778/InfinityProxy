@@ -24,7 +24,7 @@ change must update the docs/ADRs in the same change.
 | `docs/api.md` | Control API endpoints, payloads, errors, env config table |
 | `docs/scraping.md` | Source manifest, fetch loop, dedup, liveness filter, attribution |
 | `docs/dashboard.md` | Panel architecture: SSE, charts, port layout |
-| `docs/adr/` | 7 accepted decisions (per-tunnel containers, SQLite, localhost API, MIT+attribution, urltest rotation, relay-grade liveness, web panel) |
+| `docs/adr/` | 8 accepted decisions (per-tunnel containers, SQLite, localhost API, MIT+attribution, urltest rotation, relay-grade liveness, web panel, throughput-certified pool, stability-scored assignment) |
 | `docs/benchmark.md` | Real-stack benchmark harness results: first 10-minute run findings |
 | `ROADMAP.md` | v1 surface + post-v1 ambitions and stated no's |
 | `CONTRIBUTING.md` | Build, test, CI, and contribution conventions |
@@ -44,7 +44,15 @@ Never call a tunnel a "proxy server" or a node a "server". Full rules in
 - Tunnel ports: `10000–59999` from `INFINITY_TUNNEL_RANGE`; credentials stable
   per tunnel, never change on renew.
 - Liveness: protocol handshake, batch 50, 4s timeout; per-tunnel health check
-  every 30s, swap after 2 misses.
+  every 30s, swap after 2 misses. Admission since ADR-0008 additionally
+  measures a download through each fresh node (`INFINITY_THROUGHPUT_*`, default
+  floor 200 KiB/s from a 1 MiB sample, 12s cap) and gates the pool on it;
+  health checks stay handshake-only. Health also self-heals down containers
+  (`restarts_24h`). Since ADR-0009 the engine accumulates every verdict into
+  windowed `probe_ok`/`probe_total` counters and, when `INFINITY_STABILITY_ENABLED`
+  (on by default in `from_env`, off in `Settings()`), assigns nodes Tier A → B →
+  cold by a Wilson availability + within-protocol speed score (`engine/stability.py`);
+  latency stays urltest's job.
 - Renewal replaces nodes only — never the tunnel's host, port, or credentials.
 - Sources: 5 feeds with mixed licenses including GPL-3.0 (Epodonios); listing in
   `docs/scraping.md#attribution`. The aggregate-subscription feature is blocked

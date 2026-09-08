@@ -68,27 +68,33 @@ def create_app(
         "error": None,
     }
     cond = threading.Condition()
+    crawl_lock = threading.Lock()
 
     def crawl_once() -> None:
-        try:
-            status = client.status()
-            tunnels = client.tunnels()
-        except EngineError as exc:
-            with cond:
-                state["reachable"] = False
-                state["error"] = {"code": exc.code, "message": exc.message}
-                state["seq"] += 1
-                cond.notify_all()
+        if not crawl_lock.acquire(blocking=False):
             return
-        with cond:
-            state["status"] = status
-            state["tunnels"] = tunnels.get("tunnels", [])
-            state["t"] = time.time()
-            state["seq"] += 1
-            state["reachable"] = True
-            state["error"] = None
-            cond.notify_all()
-        history.add(time.time(), _metrics_from(status))
+        try:
+            try:
+                status = client.status()
+                tunnels = client.tunnels()
+            except EngineError as exc:
+                with cond:
+                    state["reachable"] = False
+                    state["error"] = {"code": exc.code, "message": exc.message}
+                    state["seq"] += 1
+                    cond.notify_all()
+                return
+            with cond:
+                state["status"] = status
+                state["tunnels"] = tunnels.get("tunnels", [])
+                state["t"] = time.time()
+                state["seq"] += 1
+                state["reachable"] = True
+                state["error"] = None
+                cond.notify_all()
+            history.add(time.time(), _metrics_from(status))
+        finally:
+            crawl_lock.release()
 
     def poll_forever() -> None:
         while True:
@@ -232,7 +238,17 @@ def create_app(
             return jsonify(
                 {"error": {"code": "not_found", "message": f"no tunnel {tunnel_id}"}}
             ), 404
-        return jsonify({"ok": True, **dial_fn(tunnel, settings.test_url)})
+        result = dial_fn(tunnel, settings.test_url)
+        if not result.get("ok"):
+            return jsonify(
+                {
+                    "error": {
+                        "code": "dial_failed",
+                        "message": result.get("error", "egress probe failed"),
+                    }
+                }
+            ), 502
+        return jsonify({"ok": True, **result})
 
     app.crawl_once = crawl_once  # type: ignore[attr-defined]
     app.panel_client = client  # type: ignore[attr-defined]

@@ -32,6 +32,9 @@ curl -s http://127.0.0.1:8787/status
     "untested": 36,
     "in_use": 120,
     "assignable": 292,
+    "tier_a": 41,
+    "tier_b": 203,
+    "avg_score": 0.61,
     "by_protocol": [
       { "protocol": "ss", "total": 400, "alive": 380, "dead": 12, "untested": 8 },
       { "protocol": "vless", "total": 80, "alive": 32, "dead": 20, "untested": 28 }
@@ -58,6 +61,9 @@ curl -s http://127.0.0.1:8787/status
 | `pool.untested` | Nodes not yet probed |
 | `pool.in_use` | Alive nodes currently assigned to tunnels |
 | `pool.assignable` | Alive nodes not assigned to any tunnel |
+| `pool.tier_a` | Alive nodes evaluated at/above the availability floor (ADR-0009; `0` when the feature is off) |
+| `pool.tier_b` | Alive nodes evaluated below the floor (ADR-0009; `0` when off) |
+| `pool.avg_score` | Mean cached availability over alive nodes (ADR-0009; `null` when off) |
 | `pool.by_protocol` | Per-protocol `total`/`alive`/`dead`/`untested` breakdown |
 | `tunnels.degraded` | Tunnels with `granted_count < requested_count` |
 | `stale_sources` | Sources whose fetch is overdue beyond their cadence |
@@ -66,9 +72,12 @@ curl -s http://127.0.0.1:8787/status
 
 Server-side filtered view of the pool. The full pool can exceed 600k nodes, so
 a pagination-less bounded read is used: **`limit` defaults to 200 and caps at
-1000**; results are ordered by `state` then latency so alive nodes surface
-first. Every node carries an `in_use` flag (alive nodes that are assigned to a
-running tunnel).
+1000**. By default results are ordered by `state` then latency so alive nodes
+surface first; when the stability feature is on (ADR-0009) and `state=alive`,
+results are ordered by stability score instead (`sort=score` forces it for any
+state). Every node carries an `in_use` flag (alive nodes that are assigned to a
+running tunnel), and — when the feature is on — its stability `score`, `tier`,
+`probe_total`, and `availability`.
 
 ```bash
 curl -s "http://127.0.0.1:8787/nodes?state=alive&protocol=ss&q=5.6.7&limit=50&in_use=1"
@@ -82,6 +91,8 @@ curl -s "http://127.0.0.1:8787/nodes?state=alive&protocol=ss&q=5.6.7&limit=50&in
 | `in_use` | `1`/`true` — only assigned nodes; `0`/`false` — only unassigned |
 | `q` | Substring match on server address or node id |
 | `limit` | Max rows, 1–1000, default 200 |
+| `sort` | `score` — stability order (Tier A, then B, then cold); `400` when the feature is off |
+| `min_tier` | `A` — only Tier A nodes; `B` — Tier A and B (cold excluded); `400` when off or invalid |
 
 ```json
 {
@@ -94,8 +105,13 @@ curl -s "http://127.0.0.1:8787/nodes?state=alive&protocol=ss&q=5.6.7&limit=50&in
       "source": "ebrasha",
       "state": "alive",
       "last_latency_ms": 45,
+      "throughput_kb_s": 812,
       "in_use": false,
-      "first_seen_s": "2026-09-07T02:00:00Z"
+      "first_seen_s": "2026-09-07T02:00:00Z",
+      "probe_total": 312,
+      "availability": 0.82,
+      "tier": "A",
+      "score": 0.71
     }
   ],
   "count": 1,
@@ -103,7 +119,14 @@ curl -s "http://127.0.0.1:8787/nodes?state=alive&protocol=ss&q=5.6.7&limit=50&in
 }
 ```
 
-**Errors:** `400` on non-integer or out-of-range `limit`.
+`probe_total`, `availability`, `tier`, and `score` are present on every node,
+but `tier`/`score` are `null` while the stability feature is off.
+`availability` is the Wilson lower bound over `probe_total` verdicts; `score`
+additionally blends the throughput percentile within the node's protocol
+(ADR-0009).
+
+**Errors:** `400` on non-integer or out-of-range `limit`, on `sort=score` or
+`min_tier` while the feature is off, and on an invalid `min_tier`.
 
 ### `GET /nodes/{id}` — single node
 
@@ -193,10 +216,10 @@ curl -s http://127.0.0.1:8787/tunnels
       "auto_renew": true,
       "state": "running",
       "degraded": true,
-      "health": { "last_check_s": 18, "dead_swapped_24h": 3 },
+      "health": { "last_check_s": 18, "dead_swapped_24h": 3, "restarts_24h": 1 },
       "nodes": [
-        { "id": "nd_1", "protocol": "vless", "latency_ms": 140 },
-        { "id": "nd_2", "protocol": "ss", "latency_ms": 220 }
+        { "id": "nd_1", "protocol": "vless", "latency_ms": 140, "availability": 0.82, "probe_total": 312, "tier": "A", "score": 0.71 },
+        { "id": "nd_2", "protocol": "ss", "latency_ms": 220, "throughput_kb_s": 812, "availability": 0.13, "probe_total": 120, "tier": "B", "score": 0.12 }
       ]
     }
   ]
@@ -260,6 +283,16 @@ All overridable via environment variables (defaults in brackets).
 | `INFINITY_MAX_MISSES` | `2` | Consecutive failures before a node is swapped |
 | `INFINITY_URTEST_INTERVAL_S` | `30` | Per-tunnel sing-box `urltest` health-check cadence; the rotator re-probes its nodes at this rate and excludes dead ones from selection (clamped to ≥ 10s, sing-box's minimum) |
 | `INFINITY_PANEL_TEST_URL` | `https://api.ipify.org` | URL the panel dials through a tunnel to prove egress |
+| `INFINITY_THROUGHPUT_ENABLED` | `1` | Measure a download through each fresh node at admission and gate the pool on its rate (ADR-0008). Set `0`/`false`/`no` to admit on handshake only |
+| `INFINITY_THROUGHPUT_MIN_KB_S` | `200` | Admission floor: nodes certified below this many KiB/s are demoted at probe time |
+| `INFINITY_THROUGHPUT_SAMPLE_BYTES` | `1048576` | Bytes the probe reads from the throughput target per node (1 MiB default) |
+| `INFINITY_THROUGHPUT_TIMEOUT_S` | `12` | Per-node cap on the throughput download; a node that cannot deliver the sample in this window drops below the floor |
+| `INFINITY_THROUGHPUT_HOST` / `_PORT` / `_PATH` | `speedtest.tele2.net` / `80` / `/1MB.bin` | Throughput target the probe downloads through each node |
+| `INFINITY_STABILITY_ENABLED` | `1` | Accumulate windowed probe counters and assign nodes by stability score (ADR-0009). Set `0`/`false`/`no` for the legacy throughput-first order |
+| `INFINITY_STABILITY_MIN_PROBES` | `6` | Verdicts a node needs before it is *evaluated*; fewer probes = cold, sorted after every evaluated node |
+| `INFINITY_STABILITY_MIN_AVAIL` | `0.4` | Availability floor separating Tier A (reliable) from Tier B |
+| `INFINITY_STABILITY_WEIGHT_AVAIL` | `0.6` | Weight of the Wilson availability term in the membership score |
+| `INFINITY_STABILITY_WEIGHT_SPEED` | `0.4` | Weight of the within-protocol throughput-percentile term |
 | `INFINITY_DB` | `infinity.db` | SQLite file path |
 
 Source cadences are per-source (see [docs/scraping.md](./scraping.md#source-manifest)).
@@ -274,6 +307,7 @@ Source cadences are per-source (see [docs/scraping.md](./scraping.md#source-mani
 | `port_exhausted` | 503 | No free ports left in `INFINITY_TUNNEL_RANGE` |
 | `source_refresh_failed` | 502 | Manual source scrape could not be queued |
 | `tunnel_runtime` | 503 | Cannot spawn/roll a tunnel: docker daemon refused the operation (e.g. overlay mount busy); the tunnel is rolled back and no nodes are left stranded |
+| `dial_failed` | 502 | Panel egress test (`POST /tunnels/{id}/test`) could not connect through the tunnel (all its assigned nodes dead, or the tunnel is down) |
 | `internal` | 500 | Unexpected engine failure |
 
 ## Example session

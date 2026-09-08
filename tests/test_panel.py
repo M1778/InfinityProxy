@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any
 
 import pytest
+import requests
 
 from panel.app import create_app
-from panel.client import EngineError
+from panel.client import EngineClient, EngineError
 from panel.config import PanelSettings
+from panel.history import SnapshotHistory
 
 FAKE_STATUS: dict[str, Any] = {
     "engine": "ok",
@@ -41,6 +44,25 @@ FAKE_TUNNEL: dict[str, Any] = {
     "degraded": False,
     "nodes": [],
 }
+
+
+class _FakeResponse:
+    def __init__(
+        self,
+        status_code: int = 200,
+        payload: Any = None,
+        content: bytes = b"{}",
+        reason: str = "OK",
+    ) -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.content = content
+        self.reason = reason
+
+    def json(self) -> Any:
+        if self._payload is not None:
+            return self._payload
+        return json.loads(self.content)
 
 
 class FakeEngine:
@@ -81,6 +103,18 @@ class FakeEngine:
     def refresh_source(self, source_name: str) -> dict[str, Any]:
         self.calls.append(("refresh", source_name))
         return {"name": source_name, "last_fetch_s": 3, "next_fetch_s": 897}
+
+
+class RaisingEngine(FakeEngine):
+    def renew_tunnel(self, tunnel_id: str) -> dict[str, Any]:
+        if tunnel_id == "ghost":
+            raise EngineError(404, "not_found", f"no tunnel {tunnel_id}")
+        return {"id": tunnel_id}
+
+
+class EngineDown(FakeEngine):
+    def status(self) -> dict[str, Any]:
+        raise EngineError(0, "engine_unreachable", "connection refused")
 
 
 @pytest.fixture()
@@ -214,3 +248,220 @@ def test_index_served(panel):
     assert res.status_code == 200
     assert "InfinityProxy" in res.get_data(as_text=True)
     assert res.get_data(as_text=True).count("chart.umd.min.js") == 1
+
+
+def test_call_always_passes_timeout_with_override_winning(monkeypatch):
+    seen: list[tuple[Any, ...]] = []
+
+    def fake_request(method: str, url: str, timeout: float | None = None, **kw: Any):
+        seen.append((method, url, timeout, kw))
+        return _FakeResponse(200, {"ok": True})
+
+    monkeypatch.setattr("panel.client.requests.request", fake_request)
+    client = EngineClient("http://127.0.0.1:8787/", timeout=7.5)
+    assert client.status() == {"ok": True}
+    client._call("POST", "/x", timeout=1.25, json={"a": 1})
+    assert seen[0][0:3] == ("GET", "http://127.0.0.1:8787/status", 7.5)
+    assert seen[1][0:3] == ("POST", "http://127.0.0.1:8787/x", 1.25)
+    assert seen[1][3] == {"json": {"a": 1}}
+
+
+def test_refresh_source_uses_scaled_timeout(monkeypatch):
+    seen: dict[str, Any] = {}
+
+    def fake_request(method: str, url: str, timeout: float | None = None, **kw: Any):
+        seen["timeout"] = timeout
+        return _FakeResponse(200, {"name": "ebrasha", "last_fetch_s": 3})
+
+    monkeypatch.setattr("panel.client.requests.request", fake_request)
+    client = EngineClient("http://127.0.0.1:8787", timeout=5.0)
+    assert client.refresh_source("ebrasha")["last_fetch_s"] == 3
+    assert seen["timeout"] == 60.0
+
+
+def test_call_maps_request_exception_to_engine_unreachable(monkeypatch):
+    def boom(method: str, url: str, timeout: float | None = None, **kw: Any):
+        raise requests.ConnectionError("refused")
+
+    monkeypatch.setattr("panel.client.requests.request", boom)
+    with pytest.raises(EngineError) as excinfo:
+        EngineClient("http://127.0.0.1:8787").status()
+    assert excinfo.value.status == 0
+    assert excinfo.value.code == "engine_unreachable"
+
+
+def test_call_maps_error_json_onto_engine_error(monkeypatch):
+    def fake_request(method: str, url: str, timeout: float | None = None, **kw: Any):
+        return _FakeResponse(404, {"error": {"code": "not_found", "message": "nope"}})
+
+    monkeypatch.setattr("panel.client.requests.request", fake_request)
+    with pytest.raises(EngineError) as excinfo:
+        EngineClient("http://127.0.0.1:8787").node("ghost")
+    assert excinfo.value.status == 404
+    assert excinfo.value.code == "not_found"
+    assert excinfo.value.message == "nope"
+
+
+def test_call_returns_none_on_204_and_json_on_2xx(monkeypatch):
+    responses = iter(
+        [_FakeResponse(204, content=b""), _FakeResponse(200, {"count": 3})]
+    )
+
+    def fake_request(method: str, url: str, timeout: float | None = None, **kw: Any):
+        return next(responses)
+
+    monkeypatch.setattr("panel.client.requests.request", fake_request)
+    client = EngineClient("http://127.0.0.1:8787")
+    assert client.delete_tunnel("tu_1") is None
+    assert client.status() == {"count": 3}
+
+
+def test_snapshot_includes_config(panel):
+    test, _ = panel
+    body = test.get("/api/snapshot").get_json()
+    assert body["config"] == {
+        "engine_url": "http://127.0.0.1:8787",
+        "panel_host": "127.0.0.1",
+        "panel_port": 8000,
+        "test_url": "https://api.ipify.org",
+    }
+
+
+def test_index_served_as_html_with_modal(panel):
+    test, _ = panel
+    res = test.get("/")
+    assert res.mimetype == "text/html"
+    assert "modal" in res.get_data(as_text=True)
+
+
+def test_app_css_keeps_modal_hidden_rule(panel):
+    test, _ = panel
+    res = test.get("/app.css")
+    assert res.status_code == 200
+    assert ".modal[hidden]" in res.get_data(as_text=True)
+
+
+def test_tunnel_test_dial_failure_maps_to_502():
+    fake = FakeEngine()
+
+    def failing_dial(tunnel: dict[str, Any], test_url: str) -> dict[str, Any]:
+        return {"ok": False, "error": "egress probe failed", "latency_ms": None}
+
+    app = create_app(
+        settings=PanelSettings(), engine=fake, dial=failing_dial, poll=False
+    )
+    app.config["TESTING"] = True
+    res = app.test_client().post("/api/tunnels/tu_1/test")
+    assert res.status_code == 502
+    assert res.get_json()["error"]["code"] == "dial_failed"
+
+
+def test_renew_engine_error_maps_to_same_status():
+    app = create_app(settings=PanelSettings(), engine=RaisingEngine(), poll=False)
+    app.config["TESTING"] = True
+    res = app.test_client().post("/api/tunnels/ghost/renew")
+    assert res.status_code == 404
+    assert res.get_json() == {
+        "error": {"code": "not_found", "message": "no tunnel ghost"}
+    }
+
+
+def test_action_engine_down_maps_to_502():
+    class DownRenew(FakeEngine):
+        def renew_tunnel(self, tunnel_id: str) -> dict[str, Any]:
+            raise EngineError(0, "engine_unreachable", "connection refused")
+
+    app = create_app(settings=PanelSettings(), engine=DownRenew(), poll=False)
+    app.config["TESTING"] = True
+    res = app.test_client().post("/api/tunnels/tu_1/renew")
+    assert res.status_code == 502
+    assert res.get_json()["error"]["code"] == "engine_unreachable"
+
+
+def test_crawl_engine_error_marks_snapshot_unreachable():
+    app = create_app(settings=PanelSettings(), engine=EngineDown(), poll=False)
+    app.config["TESTING"] = True
+    test = app.test_client()
+    app.crawl_once()
+    body = test.get("/api/snapshot").get_json()
+    assert body["reachable"] is False
+    assert body["error"] == {
+        "code": "engine_unreachable",
+        "message": "connection refused",
+    }
+
+
+def test_poll_guard_skips_overlapping_crawl():
+    """A slow crawl must not overlap itself; panel/app.py has no guard today."""  # noqa: E501
+    fake = FakeEngine()
+    app = create_app(settings=PanelSettings(), engine=fake, poll=False)
+    app.config["TESTING"] = True
+    app.test_client()
+
+    entered = threading.Event()
+    release = threading.Event()
+    status_calls = {"n": 0}
+
+    def slow_status() -> dict[str, Any]:
+        status_calls["n"] += 1
+        entered.set()
+        release.wait(5)
+        return dict(FAKE_STATUS)
+
+    fake.status = slow_status  # type: ignore[method-assign]
+    worker = threading.Thread(target=app.crawl_once)
+    worker.start()
+    assert entered.wait(5)
+    second = threading.Thread(target=app.crawl_once)
+    second.start()
+    release.set()
+    worker.join(5)
+    second.join(5)
+
+    assert status_calls["n"] == 1
+
+
+def test_history_trims_oldest_beyond_window():
+    hist = SnapshotHistory(window_s=10, max_samples=100)
+    for i in range(15):
+        hist.add(float(i), {"pool_alive": float(i)})
+    assert hist.as_columns()["t"] == [
+        4.0,
+        5.0,
+        6.0,
+        7.0,
+        8.0,
+        9.0,
+        10.0,
+        11.0,
+        12.0,
+        13.0,
+        14.0,
+    ]
+
+
+def test_history_respects_max_samples():
+    hist = SnapshotHistory(window_s=7200, max_samples=3)
+    for i in range(10):
+        hist.add(float(i), {"pool_alive": float(i)})
+    assert hist.as_columns()["t"] == [7.0, 8.0, 9.0]
+
+
+def test_history_columns_preserve_insertion_order():
+    hist = SnapshotHistory()
+    hist.add(1.0, {"pool_alive": 1.0, "pool_total": 5.0})
+    hist.add(2.0, {"pool_alive": 2.0, "tunnel_active": 3.0})
+    cols = hist.as_columns()
+    assert list(cols) == ["pool_alive", "pool_total", "tunnel_active", "t"]
+    assert cols["pool_alive"] == [1.0, 2.0]
+    assert cols["pool_total"] == [5.0]
+    assert cols["t"] == [1.0, 2.0]
+
+
+def test_history_flattens_unknown_metric_key():
+    hist = SnapshotHistory()
+    hist.add(1.0, {"pool_alive": 1.0, "mystery_metric": 9.0})
+    cols = hist.as_columns()
+    assert cols["mystery_metric"] == [9.0]
+    assert cols["pool_alive"] == [1.0]
+    assert cols["t"] == [1.0]
