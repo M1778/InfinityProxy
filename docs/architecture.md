@@ -47,7 +47,10 @@ Public feeds ─────► │  Scraper loop ─► Node pool ─► Livene
   batched and time-boxed (default batch 50, 4s timeout). Verdicts are written to
   the store batch-by-batch, so alive nodes surface while a full source pass
   still runs. Since [ADR-0009](./adr/0009-stability-scored-assignment.md) each
-  verdict also accumulates into the node's windowed probe counters.
+  verdict also accumulates into the node's windowed probe counters, and a
+  dedicated **working-set loop** handshake-probes the top-256 alive unassigned
+  nodes on a 5-minute cadence so probe history covers the pool the assigner
+  draws from next — not just nodes that happen to be assigned.
 - **Assigner** — hands each new tunnel an exclusive private set of alive nodes;
   with stability enabled it orders candidates Tier A (reliable) → B → cold by a
   Wilson availability + within-protocol speed score
@@ -167,6 +170,36 @@ sequenceDiagram
 Degraded tunnels (`granted_count < requested`) are topped up opportunistically
 on every health-check pass until they reach the requested count or the pool is
 genuinely starved.
+
+### Stability pipeline (ADR-0009)
+
+The engine treats every verdict it already performs as evidence and grades the
+pool on it ([ADR-0009](./adr/0009-stability-scored-assignment.md)):
+
+- **Verdict accumulation.** Admission, health-loop, and working-set probes all
+  write `apply_probe_results(..., stability=True)`, incrementing the node's
+  `probe_ok`/`probe_total` inside its counter window. A verdict delivered more
+  than `INFINITY_STABILITY_WINDOW_S` after `window_started_s` **folds** the
+  counters (halves them) and restarts the window — recency weighting with no
+  time-series table.
+- **Working-set loop.** A daemon thread (`infinity-working-set`) selects the top
+  `INFINITY_STABILITY_WORKING_SET` (256) alive, unassigned nodes by cached
+  availability every `_CADENCE_S` (300s) and handshake-probes those due (guarded
+  by `INFINITY_STABILITY_REPROBE_MIN_S`). Coverage therefore tracks the
+  assignable slice of the pool, independent of assignment. The same query backs
+  the `working_set` count the control API reports.
+- **Freshness.** An evaluated node whose last verdict is older than
+  `INFINITY_STABILITY_MAX_AGE_S` (21600s) leaves Tier A for Tier B until
+  re-probed; a node never evaluated stays cold regardless of age.
+- **Assignment.** With the feature enabled, `_admit_batch` records with the same
+  fold semantics, and the assigner orders candidates Tier A → B → cold by the
+  Wilson availability + within-protocol speed score (`engine/stability.py`).
+  Latency remains sing-box `urltest`'s job.
+
+The panel surfaces the resulting tier counts, mean availability, and working-set
+count (see [docs/dashboard.md](./dashboard.md)); the tuned weights and their
+benchmark evidence are recorded in [ADR-0009](./adr/0009-stability-scored-assignment.md)
+and [docs/benchmark.md](./benchmark.md).
 
 ### Pool starvation
 

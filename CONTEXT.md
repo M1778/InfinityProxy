@@ -89,9 +89,10 @@ The Wilson lower bound (`z = 1.96`) over a node's windowed probe verdicts
 2/2 node never outranks a 95/100 node. Cached on the row as `score_f`.
 
 **Tier (A / B)**:
-The membership grade of a node with enough verdicts to judge: **A** = evaluated
-and at/above the availability floor, **B** = evaluated below it. Assignment
-orders Tier A first, then B, then cold nodes.
+The membership grade of a node with enough verdicts to judge: **A** = evaluated,
+at/above the availability floor, and freshly probed; **B** = evaluated but below
+the floor, or aged past `INFINITY_STABILITY_MAX_AGE_S`. Assignment orders Tier A
+first, then B, then cold nodes.
 
 **Cold (node)**:
 Fewer than `INFINITY_STABILITY_MIN_PROBES` verdicts — not yet judgeable. Cold
@@ -102,6 +103,24 @@ stay assignable under pool starvation so a fresh pool can still fill tunnels.
 `0.6 · availability + 0.4 · within-protocol throughput percentile`, computed at
 assignment time over the candidate set. Latency is deliberately absent: sing-box
 `urltest` owns request-time latency (ADR-0005); the score is a membership vote.
+
+**Working set**:
+The top `INFINITY_STABILITY_WORKING_SET` (256) alive, unassigned nodes by cached
+availability. The Engine re-probes this set on a 5-minute loop
+(`INFINITY_STABILITY_WORKING_SET_CADENCE_S`) so probe history covers the
+population the assigner draws from next — coverage that does not depend on a node
+being assigned to a tunnel.
+
+**Counter window (window fold)**:
+Probe verdicts accumulate per node into `probe_ok`/`probe_total` inside a window
+tracked by `window_started_s`. A verdict arriving more than
+`INFINITY_STABILITY_WINDOW_S` (3600s) after the window opened halves the old
+counters and restarts the window: recency weighting with no time-series table.
+
+**Freshness**:
+A node is *fresh* while `last_probe_s` is within `INFINITY_STABILITY_MAX_AGE_S`
+(21600s). An evaluated node that ages out moves from Tier A to Tier B until it is
+re-probed.
 
 ## Interface terms
 

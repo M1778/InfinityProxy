@@ -42,7 +42,13 @@ class FakeProbeBatchStore:
     def get_node(self, node_id: str) -> Node | None:
         return self.nodes.get(node_id)
 
-    def apply_probe_results(self, results: dict[str, ProbeResult]) -> None:
+    def apply_probe_results(
+        self,
+        results: dict[str, ProbeResult],
+        *,
+        stability: bool = False,
+        window_s: float | None = None,
+    ) -> None:
         self.saved.update(results)
 
 
@@ -146,7 +152,11 @@ def test_admit_batch_records_stability_counters_when_enabled() -> None:
             self.stability_flags: list[bool] = []
 
         def apply_probe_results(
-            self, results: dict[str, ProbeResult], *, stability: bool = False
+            self,
+            results: dict[str, ProbeResult],
+            *,
+            stability: bool = False,
+            window_s: float | None = None,
         ) -> None:
             self.stability_flags.append(stability)
             self.saved.update(results)

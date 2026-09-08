@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -108,6 +109,8 @@ def test_status_ok(client):
         "by_protocol",
         "tier_a",
         "tier_b",
+        "working_set",
+        "working_set_next_s",
         "avg_score",
     }
     assert body["pool"]["by_protocol"] == []
@@ -429,6 +432,9 @@ def _seed_scored(store: Store) -> None:
     )
     nodes = {n.server: n for n in store.load_nodes()}
     # a: tier A (98/100), b: tier B (20/100), c: cold (2/2 but enormous download).
+    # last_probe_s sits 10ks in the past: fresh vs. the 6h max-age horizon but
+    # beyond the 120s reprobe-min guard, so the working-set pass will probe it.
+    now = time.time() - 10_000
     for server, ok, total, tp in (
         ("1.2.3.4", 98, 100, 400),
         ("5.6.7.8", 20, 100, 9000),
@@ -436,8 +442,17 @@ def _seed_scored(store: Store) -> None:
     ):
         store._conn.execute(
             "UPDATE nodes SET state = 'alive', probe_ok = ?, probe_total = ?, "
-            "throughput_kb_s = ?, score_f = ? WHERE node_id = ?",
-            (ok, total, tp, wilson_lower(ok, total), nodes[server].node_id),
+            "throughput_kb_s = ?, last_probe_s = ?, window_started_s = ?, "
+            "score_f = ? WHERE node_id = ?",
+            (
+                ok,
+                total,
+                tp,
+                now,
+                time.time(),  # a fresh counter window so the next probe does not fold
+                wilson_lower(ok, total),
+                nodes[server].node_id,
+            ),
         )
         store._conn.commit()
 
@@ -483,6 +498,62 @@ def test_nodes_status_pool_tiers_when_enabled(stability_client):
     assert pool["tier_a"] == 1
     assert pool["tier_b"] == 1
     assert pool["avg_score"] is not None
+    assert pool["working_set"] == 3  # every alive node covers the default 256
+
+
+def test_nodes_stale_verdict_ages_out_of_tier_a(stability_client):
+    test, store, _ = stability_client
+    _seed_scored(store)
+    a_node = next(
+        n for n in store.load_nodes() if n.probe_total == 100 and n.probe_ok == 98
+    )
+    store._conn.execute(
+        "UPDATE nodes SET last_probe_s = ? WHERE node_id = ?",
+        (time.time() - 100_000, a_node.node_id),
+    )
+    store._conn.commit()
+
+    only_a = test.get("/nodes?state=alive&min_tier=A").get_json()
+    assert len(only_a["nodes"]) == 0  # the only tier-A node aged out
+
+    b = test.get("/nodes?state=alive&min_tier=B").get_json()
+    assert {n["tier"] for n in b["nodes"]} == {"B"}
+
+
+def test_working_set_pass_probes_due_unassigned_and_records(
+    stability_client, monkeypatch
+):
+    from engine.models import ProbeResult
+
+    test, store, _ = stability_client
+    _seed_scored(store)
+    engine = app_engine(test)
+    alive_ids = {n.node_id for n in store.load_nodes(state="alive")}
+    assert len(alive_ids) == 3
+
+    called: list[list[str]] = []
+
+    def fake_batch(nodes, *, batch_size, timeout_s, on_batch=None):
+        called.append([n.node_id for n in nodes])
+        results = {
+            n.node_id: ProbeResult(n.node_id, alive=True, latency_ms=5) for n in nodes
+        }
+        if on_batch:
+            on_batch(results)
+        return results
+
+    monkeypatch.setattr("engine.scheduler.batch_probe", fake_batch)
+
+    assert engine._working_set_pass() == 3
+    assert len(called) == 1 and set(called[0]) == alive_ids
+    alive = store.load_nodes(state="alive")
+    assert len(alive) == 3
+    # seeded 100/100, 100/100, 2/2 -> one verdict each: 101, 101, 3.
+    assert {n.probe_total for n in alive} == {101, 3}
+    assert {n.probe_ok for n in alive} == {99, 21, 3}
+
+    # A second pass within the reprobe-min horizon probes nothing.
+    assert engine._working_set_pass() == 0
 
 
 def test_source_refresh(client, monkeypatch):

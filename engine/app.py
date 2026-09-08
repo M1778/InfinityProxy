@@ -108,6 +108,7 @@ def create_app(
                     n,
                     min_probes=settings.stability_min_probes,
                     min_avail=settings.stability_min_avail,
+                    max_age_s=settings.stability_max_age_s,
                 )
                 in allowed
             ]
@@ -118,6 +119,7 @@ def create_app(
                 min_avail=settings.stability_min_avail,
                 weight_avail=settings.stability_weight_avail,
                 weight_speed=settings.stability_weight_speed,
+                max_age_s=settings.stability_max_age_s,
             )
         in_use_ids = store.node_ids_in_use()
         percentiles = (
@@ -338,6 +340,7 @@ def _serialize_node(
                 node,
                 min_probes=settings.stability_min_probes,
                 min_avail=settings.stability_min_avail,
+                max_age_s=settings.stability_max_age_s,
             )
             if enabled
             else None

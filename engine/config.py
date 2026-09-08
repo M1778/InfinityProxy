@@ -39,6 +39,11 @@ class Settings:
     stability_min_avail: float = 0.4
     stability_weight_avail: float = 0.6
     stability_weight_speed: float = 0.4
+    stability_window_s: int = 3600
+    stability_max_age_s: int = 21600
+    stability_working_set: int = 256
+    stability_working_set_cadence_s: int = 300
+    stability_reprobe_min_s: int = 120
     db_path: str = "infinity.db"
     singbox_image: str = "ghcr.io/sagernet/sing-box:v1.11.6"
     engine_name_prefix: str = "infinity"
@@ -95,6 +100,13 @@ class Settings:
             stability_weight_speed=float(
                 os.environ.get("INFINITY_STABILITY_WEIGHT_SPEED", "0.4")
             ),
+            stability_window_s=_env_int("INFINITY_STABILITY_WINDOW_S", 3600),
+            stability_max_age_s=_env_int("INFINITY_STABILITY_MAX_AGE_S", 21600),
+            stability_working_set=_env_int("INFINITY_STABILITY_WORKING_SET", 256),
+            stability_working_set_cadence_s=_env_int(
+                "INFINITY_STABILITY_WORKING_SET_CADENCE_S", 300
+            ),
+            stability_reprobe_min_s=_env_int("INFINITY_STABILITY_REPROBE_MIN_S", 120),
             probe_budget_per_refresh=_env_int(
                 "INFINITY_PROBE_BUDGET_PER_REFRESH", 5000
             ),

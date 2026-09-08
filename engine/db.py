@@ -342,7 +342,11 @@ class Store:
         return self._row_to_node(row) if row is not None else None
 
     def apply_probe_results(
-        self, results: dict[str, ProbeResult], *, stability: bool = False
+        self,
+        results: dict[str, ProbeResult],
+        *,
+        stability: bool = False,
+        window_s: float | None = None,
     ) -> None:
         with self._lock:
             now = time.time()
@@ -352,26 +356,50 @@ class Store:
                 # transient health pass never erases the admission metric.
                 if stability:
                     # Windowed counters + the cached availability term for every
-                    # verdict the health/admission loops already run (ADR-0009,
-                    # Phase 1: record what we already probe). The old counters
-                    # fold at the window cadence; until then each is +1.
-                    ok_expr = f"COALESCE(probe_ok, 0) + {1 if res.alive else 0}"
-                    total_expr = "COALESCE(probe_total, 0) + 1"
+                    # verdict the health/admission loops already run (ADR-0009).
+                    # Phase-2 fold: when the node's counter window outlives
+                    # `window_s` the old counters halve (integer division mirrors
+                    # Python //) and the window restarts, giving geometric
+                    # recency weighting with O(1) storage. The fold is computed
+                    # here in Python and inlined into the UPDATE because SQLite
+                    # evaluates every SET expression against the pre-update row.
+                    row = self._conn.execute(
+                        "SELECT probe_ok, probe_total, window_started_s "
+                        "FROM nodes WHERE node_id = ?",
+                        (node_id,),
+                    ).fetchone()
+                    ok = row["probe_ok"] or 0 if row is not None else 0
+                    total = row["probe_total"] or 0 if row is not None else 0
+                    started = row["window_started_s"] if row is not None else None
+                    if window_s is not None and (
+                        started is None or now - started > window_s
+                    ):
+                        ok //= 2
+                        total //= 2
+                        started = now
+                    if started is None:
+                        started = now
+                    ok += 1 if res.alive else 0
+                    total += 1
                     self._conn.execute(
                         f"""UPDATE nodes SET
                                 state = ?,
                                 last_latency_ms = ?,
                                 throughput_kb_s = COALESCE(?, throughput_kb_s),
-                                probe_ok = {ok_expr},
-                                probe_total = {total_expr},
+                                probe_ok = ?,
+                                probe_total = ?,
+                                window_started_s = ?,
                                 last_probe_s = ?,
                                 last_alive_s = CASE WHEN ? THEN ? ELSE last_alive_s END,
-                                score_f = {_wilson_sql(ok_expr, total_expr)}
+                                score_f = {_wilson_sql(str(ok), str(total))}
                             WHERE node_id = ?""",
                         (
                             "alive" if res.alive else "dead",
                             res.latency_ms,
                             res.throughput_kb_s,
+                            ok,
+                            total,
+                            started,
                             now,
                             res.alive,
                             now,
@@ -404,6 +432,8 @@ class Store:
         *,
         min_probes: int | None = None,
         min_avail: float | None = None,
+        max_age_s: float | None = None,
+        working_set_size: int | None = None,
     ) -> dict[str, int | float | None]:
         with self._lock:
             total = int(self._conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0])
@@ -429,21 +459,33 @@ class Store:
                 ).fetchone()[0]
             )
             tier_a = tier_b = 0
+            working_set = 0
             avg_score: float | None = None
             if min_probes is not None and min_avail is not None:
                 wilson = _wilson_sql(
                     "COALESCE(probe_ok, 0)", "COALESCE(probe_total, 0)"
                 )
                 probed = "state = 'alive' AND COALESCE(probe_total, 0) >= ?"
+                # Freshness gate (ADR-0009 Phase 2): an evaluated node whose
+                # verdict aged past max_age_s leaves Tier A for Tier B.
+                fresh = ""
+                if max_age_s is not None:
+                    now = time.time()
+                    fresh = (
+                        f" AND last_probe_s IS NOT NULL "
+                        f"AND {now:g} - last_probe_s <= {max_age_s:g}"
+                    )
                 tier_a = int(
                     self._conn.execute(
-                        f"SELECT COUNT(*) FROM nodes WHERE {probed} AND {wilson} >= ?",
+                        f"SELECT COUNT(*) FROM nodes WHERE {probed}"
+                        f" AND {wilson} >= ?{fresh}",
                         (min_probes, min_avail),
                     ).fetchone()[0]
                 )
                 tier_b = int(
                     self._conn.execute(
-                        f"SELECT COUNT(*) FROM nodes WHERE {probed} AND {wilson} < ?",
+                        f"SELECT COUNT(*) FROM nodes WHERE {probed}"
+                        f" AND NOT ({wilson} >= ?{fresh})",
                         (min_probes, min_avail),
                     ).fetchone()[0]
                 )
@@ -452,6 +494,8 @@ class Store:
                 ).fetchone()
                 if row and row[0] is not None:
                     avg_score = float(row[0])
+                if working_set_size is not None:
+                    working_set = self._working_set_count_locked(working_set_size)
         return {
             "total": total,
             "alive": alive,
@@ -460,8 +504,28 @@ class Store:
             "in_use": in_use,
             "tier_a": tier_a,
             "tier_b": tier_b,
+            "working_set": working_set,
             "avg_score": avg_score,
         }
+
+    def working_set_count(self, limit: int) -> int:
+        with self._lock:
+            return self._working_set_count_locked(limit)
+
+    def _working_set_count_locked(self, limit: int) -> int:
+        # The working set is a query, not a table: the top-`limit` alive,
+        # unassigned nodes by cached availability, the same population the
+        # scheduler's working-set loop re-probes (ADR-0009 Phase 2).
+        row = self._conn.execute(
+            """SELECT COUNT(*) FROM (
+                   SELECT node_id FROM nodes
+                   WHERE state = 'alive' AND assigned_to IS NULL
+                   ORDER BY score_f DESC NULLS LAST, last_probe_s DESC
+                   LIMIT ?
+               )""",
+            (limit,),
+        ).fetchone()
+        return int(row[0])
 
     def pool_by_protocol(self) -> list[dict[str, int | str]]:
         with self._lock:

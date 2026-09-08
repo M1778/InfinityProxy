@@ -103,7 +103,9 @@ def _admit_batch(
                     ),
                 )
     if settings is not None and settings.stability_enabled:
-        store.apply_probe_results(batch, stability=True)
+        store.apply_probe_results(
+            batch, stability=True, window_s=settings.stability_window_s
+        )
     else:
         store.apply_probe_results(batch)
 

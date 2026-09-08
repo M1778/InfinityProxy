@@ -35,6 +35,8 @@ curl -s http://127.0.0.1:8787/status
     "tier_a": 41,
     "tier_b": 203,
     "avg_score": 0.61,
+    "working_set": 256,
+    "working_set_next_s": 180,
     "by_protocol": [
       { "protocol": "ss", "total": 400, "alive": 380, "dead": 12, "untested": 8 },
       { "protocol": "vless", "total": 80, "alive": 32, "dead": 20, "untested": 28 }
@@ -61,9 +63,11 @@ curl -s http://127.0.0.1:8787/status
 | `pool.untested` | Nodes not yet probed |
 | `pool.in_use` | Alive nodes currently assigned to tunnels |
 | `pool.assignable` | Alive nodes not assigned to any tunnel |
-| `pool.tier_a` | Alive nodes evaluated at/above the availability floor (ADR-0009; `0` when the feature is off) |
-| `pool.tier_b` | Alive nodes evaluated below the floor (ADR-0009; `0` when off) |
+| `pool.tier_a` | Alive nodes evaluated at/above the availability floor and freshly probed (ADR-0009; `0` when the feature is off) |
+| `pool.tier_b` | Alive nodes evaluated below the floor, or whose verdicts aged past `INFINITY_STABILITY_MAX_AGE_S` (ADR-0009; `0` when off) |
 | `pool.avg_score` | Mean cached availability over alive nodes (ADR-0009; `null` when off) |
+| `pool.working_set` | Alive, unassigned nodes in the top `INFINITY_STABILITY_WORKING_SET` by cached availability — the population the working-set loop re-probes (ADR-0009; `0` when off) |
+| `pool.working_set_next_s` | Seconds until the next working-set probe pass; `null` when the feature is off |
 | `pool.by_protocol` | Per-protocol `total`/`alive`/`dead`/`untested` breakdown |
 | `tunnels.degraded` | Tunnels with `granted_count < requested_count` |
 | `stale_sources` | Sources whose fetch is overdue beyond their cadence |
@@ -123,7 +127,9 @@ curl -s "http://127.0.0.1:8787/nodes?state=alive&protocol=ss&q=5.6.7&limit=50&in
 but `tier`/`score` are `null` while the stability feature is off.
 `availability` is the Wilson lower bound over `probe_total` verdicts; `score`
 additionally blends the throughput percentile within the node's protocol
-(ADR-0009).
+(ADR-0009). A node is Tier A only while its verdicts are fresh (within
+`INFINITY_STABILITY_MAX_AGE_S`); aged nodes report Tier B until the working-set
+loop re-probes them.
 
 **Errors:** `400` on non-integer or out-of-range `limit`, on `sort=score` or
 `min_tier` while the feature is off, and on an invalid `min_tier`.
@@ -293,6 +299,11 @@ All overridable via environment variables (defaults in brackets).
 | `INFINITY_STABILITY_MIN_AVAIL` | `0.4` | Availability floor separating Tier A (reliable) from Tier B |
 | `INFINITY_STABILITY_WEIGHT_AVAIL` | `0.6` | Weight of the Wilson availability term in the membership score |
 | `INFINITY_STABILITY_WEIGHT_SPEED` | `0.4` | Weight of the within-protocol throughput-percentile term |
+| `INFINITY_STABILITY_WINDOW_S` | `3600` | Probe counters fold (halve) when a verdict arrives this long after `window_started_s`, then the window restarts |
+| `INFINITY_STABILITY_MAX_AGE_S` | `21600` | A node whose last verdict is older than this leaves Tier A for Tier B until re-probed |
+| `INFINITY_STABILITY_WORKING_SET` | `256` | Size of the alive-unassigned handshake working set re-probed by the dedicated loop |
+| `INFINITY_STABILITY_WORKING_SET_CADENCE_S` | `300` | Cadence of the working-set probe loop |
+| `INFINITY_STABILITY_REPROBE_MIN_S` | `120` | Minimum gap a node needs before the working-set loop re-probes it |
 | `INFINITY_DB` | `infinity.db` | SQLite file path |
 
 Source cadences are per-source (see [docs/scraping.md](./scraping.md#source-manifest)).

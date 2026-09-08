@@ -52,6 +52,7 @@ class Engine:
         self._started_s = time.time()
         self._refreshing: set[str] = set()
         self._refresh_lock = threading.Lock()
+        self._last_working_set_s: float | None = None
 
     def start(self) -> None:
         seed_sources(self.store)
@@ -62,6 +63,9 @@ class Engine:
             ),
             threading.Thread(
                 target=self._health_loop, name="infinity-health", daemon=True
+            ),
+            threading.Thread(
+                target=self._working_set_loop, name="infinity-working-set", daemon=True
             ),
         ]
         for thread in self._threads:
@@ -141,7 +145,11 @@ class Engine:
             # Record windowed availability counters for the 30s health stream
             # (ADR-0009, Phase 1) before any swap decisions are made on it.
             if self.settings.stability_enabled:
-                self.store.apply_probe_results(results, stability=True)
+                self.store.apply_probe_results(
+                    results,
+                    stability=True,
+                    window_s=self.settings.stability_window_s,
+                )
             else:
                 self.store.apply_probe_results(results)
             for node in assigned:
@@ -278,6 +286,55 @@ class Engine:
                     logger.exception("health check failed for %s", tunnel.tunnel_id)
             self._stop.wait(self.settings.health_interval_s)
 
+    def _working_set_loop(self) -> None:
+        while not self._stop.is_set():
+            if self.settings.stability_enabled:
+                try:
+                    self._working_set_pass()
+                except Exception:  # noqa: BLE001 - the loop must survive one bad pass
+                    logger.exception("working-set probe pass failed")
+            self._stop.wait(self.settings.stability_working_set_cadence_s)
+
+    def _working_set_pass(self) -> int:
+        """Re-probe the top `stability_working_set` alive, unassigned nodes.
+
+        The working set is a query, not a table (ADR-0009 Phase 2): the highest
+        cached availability among unassigned nodes, which doubles as the
+        population the assigner most often draws from next. Probing it every
+        cadence keeps `score_f`-ordering fresh across the pool's most-assignable
+        slice far more often than a full deep-scan would. Handshake-only (the
+        30s health loop already certifies assigned nodes; throughput probing
+        stays an admission-gate job). Returns the number of nodes this pass
+        probed after the reprobe-min guard.
+        """
+        self._last_working_set_s = time.time()
+        nodes = self.store.load_nodes(
+            state="alive",
+            in_use=False,
+            order_by_score=True,
+            limit=self.settings.stability_working_set,
+        )
+        now = time.time()
+        due = [
+            n
+            for n in nodes
+            if n.last_probe_s is None
+            or now - n.last_probe_s >= self.settings.stability_reprobe_min_s
+        ]
+        if not due:
+            return 0
+        results = batch_probe(
+            due,
+            batch_size=self.settings.batch_size,
+            timeout_s=self.settings.probe_timeout_s,
+            on_batch=lambda batch: self.store.apply_probe_results(
+                batch,
+                stability=True,
+                window_s=self.settings.stability_window_s,
+            ),
+        )
+        return len(results)
+
     def engine_status(self) -> dict[str, Any]:
         summaries = {s["name"]: s for s in self.store.sources_summary()}
         now = time.time()
@@ -285,6 +342,8 @@ class Engine:
             pool = self.store.pool_counts(
                 min_probes=self.settings.stability_min_probes,
                 min_avail=self.settings.stability_min_avail,
+                max_age_s=self.settings.stability_max_age_s,
+                working_set_size=self.settings.stability_working_set,
             )
         else:
             pool = self.store.pool_counts()
@@ -315,6 +374,7 @@ class Engine:
                 "in_use": pool["in_use"],
                 "tier_a": pool["tier_a"],
                 "tier_b": pool["tier_b"],
+                "working_set": pool["working_set"],
                 "avg_score": pool["avg_score"],
                 "by_protocol": self.store.pool_by_protocol(),
                 "assignable": sum(
@@ -323,6 +383,18 @@ class Engine:
                         state="alive", protocols=set(ASSIGNABLE_PROTOCOLS)
                     )
                     if n.node_id not in self.store.node_ids_in_use()
+                ),
+                "working_set_next_s": (
+                    max(
+                        0,
+                        int(
+                            self._last_working_set_s
+                            + self.settings.stability_working_set_cadence_s
+                            - now
+                        ),
+                    )
+                    if self._last_working_set_s is not None
+                    else 0
                 ),
             },
             "tunnels": {

@@ -51,6 +51,19 @@ browser ── SSE ──► panel:8000 (Flask)
   tunnel (CONNECT) and reports the exit IP + latency — the only feature that
   needs panel-originated outbound traffic (env `INFINITY_PANEL_TEST_URL`).
 
+## Panel views
+
+The Overview view renders the pool as a single Chart.js chart with two axes:
+total / alive / assignable lifetimes (primary) plus the Tier-A count (dashed) and
+the mean cached availability (secondary, 0–1 axis, ADR-0009). Summary cards add
+pool **Tier A** and the live **working-set** count — the top
+`INFINITY_STABILITY_WORKING_SET` alive-unassigned nodes the engine re-probes.
+
+The tunnels table shows each tunnel's assigned-node **tier mix** (A/B/cold); the
+nodes table carries **availability**, **score**, and **tier** columns. All of
+these come from fields the engine already reports on `GET /status` and
+`GET /nodes`; the panel adds no opinion about the numbers.
+
 ## Engine API additions
 
 | Endpoint | Purpose |

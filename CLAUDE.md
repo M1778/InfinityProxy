@@ -48,11 +48,18 @@ Never call a tunnel a "proxy server" or a node a "server". Full rules in
   measures a download through each fresh node (`INFINITY_THROUGHPUT_*`, default
   floor 200 KiB/s from a 1 MiB sample, 12s cap) and gates the pool on it;
   health checks stay handshake-only. Health also self-heals down containers
-  (`restarts_24h`). Since ADR-0009 the engine accumulates every verdict into
-  windowed `probe_ok`/`probe_total` counters and, when `INFINITY_STABILITY_ENABLED`
-  (on by default in `from_env`, off in `Settings()`), assigns nodes Tier A → B →
-  cold by a Wilson availability + within-protocol speed score (`engine/stability.py`);
-  latency stays urltest's job.
+  (`restarts_24h`). Since ADR-0009 the engine accumulates every verdict (admission,
+  health, working-set) into windowed `probe_ok`/`probe_total` counters and, when
+  `INFINITY_STABILITY_ENABLED` (on by default in `from_env`, off in `Settings()`),
+  assigns nodes Tier A → B → cold by a Wilson availability + within-protocol
+  speed score (`engine/stability.py`); latency stays urltest's job. Counters
+  fold (halve) when a verdict arrives after `INFINITY_STABILITY_WINDOW_S` (3600,
+  keys `INFINITY_STABILITY_*` in `engine/config.py`); a dedicated daemon thread
+  (`infinity-working-set`) handshake-probes the top-256 alive unassigned nodes
+  every 300s (`..._WORKING_SET_*`, `..._REPROBE_MIN_S`); evaluated nodes whose
+  verdicts age past `INFINITY_STABILITY_MAX_AGE_S` (21600) leave Tier A for Tier
+  B until re-probed. Tuning evidence via `tools/prod_bench.py` +
+  `tools/stability_tune.py`; benchmark results in `docs/benchmark.md`.
 - Renewal replaces nodes only — never the tunnel's host, port, or credentials.
 - Sources: 5 feeds with mixed licenses including GPL-3.0 (Epodonios); listing in
   `docs/scraping.md#attribution`. The aggregate-subscription feature is blocked

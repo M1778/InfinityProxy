@@ -114,6 +114,8 @@ const CARD_DEFS = [
   ["pool", "untested", "untested", "not yet probed"],
   ["tunnels", "active", "ok", "running sing-box listeners"],
   ["tunnels", "degraded", "dead", "granted < requested"],
+  ["pool", "tier_a", "ok", "evaluated by Wilson availability"],
+  ["pool", "working_set", "accent", "top candidates, re-probed every 5m"],
 ];
 
 function renderOverview() {
@@ -191,6 +193,8 @@ function redrawCharts() {
         { label: "untested", data: pooled("pool_untested"), stack: "pool", fill: true, backgroundColor: "rgba(148,163,184,.18)", borderColor: "#94a3b8", borderWidth: 1.5, pointRadius: 0, tension: 0 },
         { label: "alive", data: pooled("pool_alive"), stack: "pool", fill: true, backgroundColor: "rgba(52,211,153,.18)", borderColor: "#34d399", borderWidth: 1.5, pointRadius: 0, tension: 0 },
         { label: "in_use", data: pooled("pool_in_use"), stack: "overlay", fill: false, borderColor: "#fbbf24", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+        { label: "tier_a", data: pooled("pool_tier_a"), fill: false, borderColor: "#38bdf8", borderWidth: 1.5, borderDash: [2, 2], pointRadius: 0, tension: 0 },
+        { label: "avg_score", data: pooled("pool_avg_score"), yAxisID: "y1", fill: false, borderColor: "#a78bfa", borderWidth: 1.5, pointRadius: 0, tension: 0 },
       ]},
       options: {
         parsing: false,
@@ -204,12 +208,13 @@ function redrawCharts() {
         scales: {
           x: timeXScale(),
           y: { beginAtZero: true, stacked: true, border: { display: false }, ticks: { precision: 0, maxTicksLimit: 5 } },
+          y1: { position: "right", min: 0, max: 1, border: { display: false }, ticks: { precision: 1, maxTicksLimit: 4 }, grid: { drawOnChartArea: false } },
         },
       },
     });
   }
   const poolChart = state.panels.pool;
-  ["pool_dead", "pool_untested", "pool_alive", "pool_in_use"].forEach((key, i) => {
+  ["pool_dead", "pool_untested", "pool_alive", "pool_in_use", "pool_tier_a", "pool_avg_score"].forEach((key, i) => {
     poolChart.data.datasets[i].data = pooled(key);
   });
   poolChart.update("none");
@@ -330,6 +335,17 @@ function stateBadge(s, degraded) {
   return `<span class="badge ${s === "running" ? "ok" : s === "error" ? "dead" : "idle"}">${esc(s)}</span>`;
 }
 
+function tierMix(nodes) {
+  const a = nodes.filter((n) => n.tier === "A").length;
+  const b = nodes.filter((n) => n.tier === "B").length;
+  const cold = nodes.length - a - b;
+  const parts = [];
+  if (a) parts.push(`<span class="badge ok">A ${a}</span>`);
+  if (b) parts.push(`<span class="badge idle">B ${b}</span>`);
+  if (cold) parts.push(`<span class="badge untested">${cold}</span>`);
+  return parts.join(" ") || '<span class="muted">—</span>';
+}
+
 function renderTunnels() {
   if (!state.snap) return;
   const rows = state.snap.tunnels || [];
@@ -340,6 +356,7 @@ function renderTunnels() {
       <td class="mono">${esc(t.id)}</td>
       <td class="mono">127.0.0.1:${t.port}</td>
       <td>${t.node_count_granted}/${t.node_count_requested}</td>
+      <td>${tierMix(t.nodes || [])}</td>
       <td>${stateBadge(t.state, t.degraded)}</td>
       <td class="muted">${esc(health.healthy ? "healthy" : "unhealthy")}${health.dead_swapped_24h ? ` · ${health.dead_swapped_24h} swap` : ""}${health.restarts_24h ? ` · ${health.restarts_24h} restart` : ""}</td>
       <td>
@@ -351,7 +368,7 @@ function renderTunnels() {
         </div>
       </td>
     </tr>`;
-  }).join("") || `<tr><td colspan="6" class="muted">No tunnels. Create one above.</td></tr>`;
+  }).join("") || `<tr><td colspan="7" class="muted">No tunnels. Create one above.</td></tr>`;
 }
 
 async function createTunnel(e) {
@@ -426,7 +443,10 @@ function renderNodes() {
     <td class="mono">${n.last_latency_ms ?? "—"} ms</td>
     <td class="mono">${n.throughput_kb_s ? Math.round(n.throughput_kb_s) + " KiB/s" : "—"}</td>
     <td>${n.in_use ? '<span class="badge warn">in use</span>' : '<span class="badge idle">free</span>'}</td>
-  </tr>`.trim()).join("") || `<tr><td colspan="8" class="muted">No nodes match the filters.</td></tr>`;
+    <td class="mono">${n.availability != null ? (n.availability * 100).toFixed(0) + "%" : "—"}</td>
+    <td class="mono">${n.score != null ? n.score.toFixed(2) : "—"}</td>
+    <td>${n.tier ? `<span class="badge ${n.tier === "A" ? "ok" : "idle"}">${esc(n.tier)}</span>` : '<span class="badge untested">cold</span>'}</td>
+  </tr>`.trim()).join("") || `<tr><td colspan="11" class="muted">No nodes match the filters.</td></tr>`;
 }
 
 async function nodeDetail(id) {

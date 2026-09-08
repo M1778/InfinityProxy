@@ -1,4 +1,5 @@
 import sqlite3
+import time
 
 import pytest
 
@@ -54,6 +55,7 @@ def test_schema_creation_and_idempotence(store: Store) -> None:
         "untested": 0,
         "tier_a": 0,
         "tier_b": 0,
+        "working_set": 0,
         "avg_score": None,
     }
     assert store.sources_summary() == []
@@ -388,6 +390,7 @@ def test_pool_counts(store: Store) -> None:
         "untested": 2,
         "tier_a": 0,
         "tier_b": 0,
+        "working_set": 0,
         "avg_score": None,
     }
 
@@ -674,3 +677,98 @@ def test_pool_counts_tiers_and_avg_score(store: Store) -> None:
 
     # Cold (third) node has no counters; unevaluated alive nodes are in neither tier.
     assert counts["tier_a"] + counts["tier_b"] == 2
+
+
+def test_apply_probe_results_window_fold_halves_old_counters(store: Store) -> None:
+    store.upsert_candidates([make_candidate(source="a")])
+    node = store.load_nodes()[0]
+
+    window_s = 3600.0
+    for alive in (True, True):
+        store.apply_probe_results(
+            {node.node_id: ProbeResult(node.node_id, alive=alive, latency_ms=10)},
+            stability=True,
+            window_s=window_s,
+        )
+    assert (got := store.get_node(node.node_id)).probe_total == 2
+    assert got.probe_ok == 2
+    assert got.window_started_s is not None
+
+    # Age the window past the horizon: the next verdict halves the old counters
+    # (integer division) and restarts the window before adding itself.
+    store._conn.execute(
+        "UPDATE nodes SET window_started_s = ? WHERE node_id = ?",
+        (time.time() - window_s * 2, node.node_id),
+    )
+    store._conn.commit()
+    store.apply_probe_results(
+        {node.node_id: ProbeResult(node.node_id, alive=True, latency_ms=10)},
+        stability=True,
+        window_s=window_s,
+    )
+
+    got = store.get_node(node.node_id)
+    assert got.probe_total == 2  # 2 // 2 + 1
+    assert got.probe_ok == 2  # 2 // 2 + 1
+    assert time.time() - got.window_started_s < 5
+
+
+def test_working_set_count_orders_by_score_and_excludes_assigned(store: Store) -> None:
+    store.upsert_candidates(
+        [
+            make_candidate(source="a", server="1.1.1.1"),
+            make_candidate(source="b", server="2.2.2.2"),
+            make_candidate(source="c", server="3.3.3.3"),
+            make_candidate(source="d", server="4.4.4.4"),
+        ]
+    )
+    nodes = {n.server: n for n in store.load_nodes()}
+    for server, score, assigned in (
+        ("1.1.1.1", 0.9, False),
+        ("2.2.2.2", 0.8, False),
+        ("3.3.3.3", 0.99, True),
+        ("4.4.4.4", None, False),
+    ):
+        store._conn.execute(
+            "UPDATE nodes SET state = 'alive', score_f = ?, "
+            "assigned_to = ?, last_probe_s = ? WHERE node_id = ?",
+            (score, "tu_x" if assigned else None, time.time(), nodes[server].node_id),
+        )
+    store._conn.commit()
+
+    assert store.working_set_count(limit=2) == 2  # 1.1.1.1 and 2.2.2.2
+    assert store.working_set_count(limit=1) == 1  # top scorer among the unassigned
+    assert store.working_set_count(limit=10) == 3  # assigned 3.3.3.3 excluded
+
+
+def test_pool_counts_freshness_gate_ages_verdicts_out_of_tier_a(store: Store) -> None:
+    from engine.stability import wilson_lower
+
+    store.upsert_candidates(
+        [
+            make_candidate(source="a", server="1.1.1.1"),
+            make_candidate(source="b", server="2.2.2.2"),
+            make_candidate(source="c", server="3.3.3.3"),
+        ]
+    )
+    nodes = {n.server: n for n in store.load_nodes()}
+    now = time.time()
+    for server, ok, total, last_probe in (
+        ("1.1.1.1", 90, 100, now),  # fresh, high avail -> A
+        ("2.2.2.2", 20, 100, now),  # fresh, low avail -> B
+        ("3.3.3.3", 90, 100, now - 100_000),  # stale, high avail -> B
+    ):
+        store._conn.execute(
+            "UPDATE nodes SET state = 'alive', probe_ok = ?, probe_total = ?, "
+            "last_probe_s = ?, score_f = ? WHERE node_id = ?",
+            (ok, total, last_probe, wilson_lower(ok, total), nodes[server].node_id),
+        )
+    store._conn.commit()
+
+    no_horizon = store.pool_counts(min_probes=6, min_avail=0.4)
+    assert no_horizon["tier_a"] == 2  # both high-avail nodes, freshness off
+    assert no_horizon["tier_b"] == 1
+
+    aged = store.pool_counts(min_probes=6, min_avail=0.4, max_age_s=3600)
+    assert aged["tier_a"] == 1  # 1.1.1.1 only
+    assert aged["tier_b"] == 2  # 2.2.2.2 (low avail) + 3.3.3.3 (stale after aging)

@@ -115,7 +115,13 @@ the node (`INFINITY_STABILITY_ENABLED`), and assignment ranks candidates by a
 Wilson availability score plus a within-protocol throughput percentile — Tier A
 (reliable) before Tier B before cold — instead of the single last throughput
 snapshot. Latency is still urltest's job at request time; the stability score
-only decides *who gets assigned*. The survival schema details live in
+only decides *who gets assigned*. Since Phase 2 of that ADR a third probe path
+— the **working-set loop** — handshake-probes the top 256 alive, unassigned
+nodes by cached availability on a 5-minute cadence, so probe history covers the
+assignable slice of the pool even when a node is never assigned. Counters fold
+(halve) when a verdict arrives more than an hour after the counter window
+opened, and a node whose verdicts age past 6 hours drops from Tier A to Tier B
+until re-probed. The survival schema details live in
 [architecture.md](./architecture.md#node-pool).
 
 - Candidates queue through the filter in batches of 50; each node has 4s to

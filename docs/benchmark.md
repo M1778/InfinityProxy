@@ -104,6 +104,46 @@ were updated in the same change.
    strand a half-created `starting` tunnel row; now it is released and rolled
    back with a clean 502 `invalid_nodes`.
 
+## Stability-assignment bench (ADR-0009 Phase 3, 2026-09-08)
+
+Purpose: decide whether the ADR-0009 weights (`0.6` avail / `0.4` speed) and the
+`0.4` availability floor move, on evidence. `tools/prod_bench.py` now correlates
+every request against the node-quality vector its tunnel held at that instant
+(tier-a share, mean availability, mean score), and the new
+`tools/stability_tune.py` buckets ok-rate on those axes and writes `tune.md`.
+
+Run: 150 s, 2 tunnels × 3 requested nodes, 6 req/min, against the live engine.
+
+Pool at the time: **628,661 scraped → 19 alive, all `ss`; 15 tier A, 1
+assignable** — the pool was near-starvation, so both tunnels degraded at
+creation (`node_count_granted < requested`) and the request plane is tunnel-grant
+state as much as node quality.
+
+| metric | value |
+| --- | --- |
+| requests | 13 |
+| ok | 7 (53.8%) |
+| ok leg | HTTP 7/7 through one tunnel (exit 138.124.68.88) |
+| failed leg | SOCKS5 0/6, every dial `outbound/urltest: operation not permitted` |
+| requests correlated to a node sample | 7 (all 7 ok; `tier_a_share == 0`) |
+| mean probe_total over alive nodes | 27.2 |
+
+Findings:
+
+- **No tier/score separation measurable** at 13 requests. The only correlated
+  leg succeeded 7/7 regardless of bucket; the failing leg failed at the
+  sing-box dial layer (`operation not permitted` — a new failure class for the
+  harness, distinct from the relay-refusal classes of runs 1–3) before any
+  node-quality sample existed for it.
+- `stability_tune.py` therefore takes the **"no signal"** branch: the
+  conservative defaults stay (`WEIGHT_AVAIL = 0.6`, `WEIGHT_SPEED = 0.4`,
+  `MIN_AVAIL = 0.4`). Re-run is expected once the live pool escapes starvation
+  (its probe history is 27 verdicts/node on average — thin for a Wilson bound).
+
+The working-set loop behaves as designed under starvation: with one assignable
+node it probes that node each cadence and the `working_set` count in `GET
+/status` tracks the top-256 alive-unassigned slice.
+
 ## Outstanding, tracked for a future change
 
 - Liveness still certifies any echoing TCP port. A real per-protocol relay

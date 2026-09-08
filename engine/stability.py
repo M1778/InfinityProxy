@@ -11,6 +11,7 @@ wildly between vless feeds and ss). Latency is deliberately excluded: sing-box
 from __future__ import annotations
 
 import math
+import time
 from bisect import bisect_right
 from collections import defaultdict
 from typing import Sequence
@@ -41,6 +42,16 @@ def availability(node: Node) -> float:
     return wilson_lower(node.probe_ok, node.probe_total)
 
 
+def is_fresh(node: Node, now: float, max_age_s: float) -> bool:
+    """True while the node's last verdict is within the freshness horizon.
+
+    Free-node verdicts decay: a node unprobed for longer than
+    INFINITY_STABILITY_MAX_AGE_S drops out of Tier A even if its windowed
+    availability is high (ADR-0009, Phase 2).
+    """
+    return node.last_probe_s is not None and now - node.last_probe_s <= max_age_s
+
+
 def speed_percentile_map(nodes: Sequence[Node]) -> dict[str, float]:
     """Percentile rank (0..1) of each measured node within its protocol.
 
@@ -69,14 +80,27 @@ def speed_percentile_map(nodes: Sequence[Node]) -> dict[str, float]:
     return out
 
 
-def tier(node: Node, *, min_probes: int, min_avail: float) -> str | None:
-    """A = evaluated and at/above the availability floor; B = evaluated below it.
+def tier(
+    node: Node,
+    *,
+    min_probes: int,
+    min_avail: float,
+    max_age_s: float | None = None,
+    now: float | None = None,
+) -> str | None:
+    """A = evaluated, fresh, and at/above the availability floor; B = the rest.
 
     None means the node has too few probes to judge (cold start) and must never
-    outrank an evaluated node, but stays assignable under pool starvation.
+    outrank an evaluated node, but stays assignable under pool starvation. With
+    a freshness horizon (`max_age_s`), an evaluated node whose last verdict has
+    aged out drops from A to B (Phase 2).
     """
     if node.probe_total < min_probes:
         return None
+    if max_age_s is not None:
+        now = time.time() if now is None else now
+        if not is_fresh(node, now, max_age_s):
+            return "B"
     return "A" if availability(node) >= min_avail else "B"
 
 
@@ -106,13 +130,21 @@ def score_nodes(
     min_avail: float,
     weight_avail: float,
     weight_speed: float,
+    max_age_s: float | None = None,
+    now: float | None = None,
 ) -> list[Node]:
     """Order candidates for admission: Tier A, then Tier B, then cold, each
     by composite score descending (tested latency as the final tiebreak)."""
     percentiles = speed_percentile_map(nodes)
 
     def _key(node: Node) -> tuple[int, float, int]:
-        node_tier = tier(node, min_probes=min_probes, min_avail=min_avail)
+        node_tier = tier(
+            node,
+            min_probes=min_probes,
+            min_avail=min_avail,
+            max_age_s=max_age_s,
+            now=now,
+        )
         rank = {"A": 0, "B": 1}.get(node_tier, 2)
         score = composite_score(
             node,

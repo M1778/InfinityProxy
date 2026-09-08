@@ -4,7 +4,7 @@
 - Date: 2026-09-09
 - Extends: [ADR-0006](./0006-relay-grade-liveness-probes.md),
   [ADR-0008](./0008-throughput-certified-pool.md)
-- Phase: 1 of 3 (see [Consequences](#consequences))
+- Phase: 3 of 3 (shipped — Phases 2 and 3 land as one follow-up change)
 
 ## Context
 
@@ -40,8 +40,8 @@ windowed counters, and assignment reads a persistent stability score.
    | `probe_total` | Verdicts accumulated in the current window |
    | `probe_ok` | Alive verdicts within the window |
    | `window_started_s` | Epoch when the window opened (fold hook, Phase 2) |
-   | `last_probe_s` | Epoch of the last verdict of any kind |
-   | `last_alive_s` | Epoch of the last alive verdict (freshness hook, Phase 2) |
+   | `last_probe_s` | Epoch of the last verdict of any kind (freshness, Phase 2) |
+   | `last_alive_s` | Epoch of the last alive verdict (reserve hook; freshness deliberately uses `last_probe_s` so a node that never passes stays cold rather than merely stale) |
    | `score_f` | Cached context-free score term (see below) |
 
 2. **Availability = Wilson lower bound.** `probe_ok / probe_total` with a 95%
@@ -80,15 +80,16 @@ windowed counters, and assignment reads a persistent stability score.
 7. **Assignment and admission both record.** The pool's admission gate
    (`_admit_batch`) and the 30s health loop both call
    `apply_probe_results(..., stability=True)` when enabled. The counters fold at
-   the window cadence; until the Phase-2 window hook lands, each verdict is a
-   `+1`.
+   the window cadence (Phase 2): halved and the window restarted whenever a
+   verdict arrives after `INFINITY_STABILITY_WINDOW_S`.
 
 ## Trade-offs, accepted
 
 - **Cold nodes are deliberately second-class.** A brand-new fast node with a
   2/2 history will lose every head-to-head against an evaluated Tier-B node,
   even if the evaluated node is slow. Accepted: stability is the point of the
-  ADR; freshness gets its own hook (`last_alive_s`) in Phase 2.
+  ADR; freshness is the counterweight (Phase 2), hooking off `last_probe_s` so
+  any recent verdict keeps a node's level while unevaluated nodes stay cold.
 - **The composite is a heuristic, not evidence.** Weights (0.6/0.4) and the
   0.4 availability floor are initial choices; the benchmark harness should
   tune them before Phase 3 ships. Until then the defaults are conservative.
@@ -107,18 +108,44 @@ windowed counters, and assignment reads a persistent stability score.
   tier counts.
 - `GET /nodes` gains `sort=score` and `min_tier=A|B` (both `400` when the
   feature is off), and node objects carry `probe_total`, `availability`,
-  `tier`, and `score`. `GET /status` pool counts gain `tier_a`, `tier_b`, and
-  `avg_score`.
+  `tier`, and `score`. `GET /status` pool counts gain `tier_a`, `tier_b`,
+  `avg_score`, `working_set`, and `working_set_next_s`.
 - The docs ([docs/api.md](../api.md#configuration), [docs/scraping.md](../scraping.md#liveness-filter),
   [docs/architecture.md](../architecture.md)) and this record change in the same
   commit as the engine (doc-first).
-- **Phase 2 (separate change):** the top-`INFINITY_STABILITY_WORKING_SET`
-  (planned 256) youngest nodes get handshake probes on a 5-minute cadence so
-  history covers the whole pool; window folding (`window_started_s`) and a
-  freshness decay; the panel's pools chart adds tier/availability series.
-  `avg_score` and the tier counts are wired for it now.
-- **Phase 3 (separate change):** tune `INFINITY_STABILITY_WEIGHT_*` and
-  `_MIN_AVAIL` from benchmark-harness evidence, not defaults.
+- **Phase 2 (shipped in a follow-up change):**
+  - **Working set.** A daemon thread (`infinity-working-set`) selects the top
+    `INFINITY_STABILITY_WORKING_SET` (256) **alive, unassigned** nodes by cached
+    availability every `_CADENCE_S` (default 300s) and handshake-probes those
+    due (`INFINITY_STABILITY_REPROBE_MIN_S`, default 120s). History therefore
+    covers the population the assigner draws from next, independent of
+    assignment. This is a query, not a table — the same query backs the
+    `working_set` count in `GET /status`.
+  - **Window folding.** `apply_probe_results` halves `probe_ok`/`probe_total`
+    and restarts `window_started_s` whenever a verdict arrives after
+    `INFINITY_STABILITY_WINDOW_S` (default 3600s). The recomputed `score_f`
+    cache is written in the same UPDATE (the fold is applied in Python, then the
+    tree of column expressions is re-derived from the folded counts).
+  - **Freshness decay.** A node is Tier A only while `last_probe_s` is within
+    `INFINITY_STABILITY_MAX_AGE_S` (default 21600s); aged nodes report Tier B
+    until the working-set or admission loops re-probe them.
+  - **Panel.** The pool chart adds a dashed Tier-A series and a mean-availability
+    line (secondary 0–1 axis); summary cards add Tier A and the working-set
+    count; the tunnels table gains the tier mix and the nodes table availability
+    / score / tier columns.
+- **Phase 3 (shipped in the same follow-up change):** `tools/prod_bench.py`
+  now correlates every request to the assigned-node quality vector it ran
+  against, and the new `tools/stability_tune.py` buckets ok-rate on tier-a
+  share and mean score to decide whether the weights move. Measured findings
+  (150 s run against a near-starved live pool — 628,661 scraped, 19 alive, 1
+  assignable; see [docs/benchmark.md](../benchmark.md#stability-assignment-bench-adr-0009-phase-3-2026-09-08)):
+
+  - 13 requests, 7 ok (53.8%): the correlated HTTP leg succeeded 7/7; the
+    SOCKS5 leg failed 0/6 at the sing-box dial layer (`operation not
+    permitted`) before any node-quality sample existed for it.
+  - No tier/score separation measurable at these volumes — **no signal**. The
+    conservative defaults stay: `WEIGHT_AVAIL = 0.6`, `WEIGHT_SPEED = 0.4`,
+    `MIN_AVAIL = 0.4`, and the tune is re-run once the pool escapes starvation.
 
 ## Out of scope
 

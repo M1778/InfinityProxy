@@ -25,6 +25,10 @@ def _metrics_from(status: dict[str, Any]) -> dict[str, float]:
         "pool_untested": pool.get("untested", 0),
         "pool_in_use": pool.get("in_use", 0),
         "pool_assignable": pool.get("assignable", 0),
+        "pool_tier_a": pool.get("tier_a", 0),
+        "pool_tier_b": pool.get("tier_b", 0),
+        "pool_working_set": pool.get("working_set", 0),
+        "pool_avg_score": pool.get("avg_score", 0),
         "tunnel_active": tunnels.get("active", 0),
         "tunnel_degraded": tunnels.get("degraded", 0),
     }

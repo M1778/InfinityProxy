@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic, sleep
@@ -27,7 +28,7 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BENCHMARK_TARGET = "https://api.ipify.org"
-CONTROL = "http://127.0.0.1:8787"
+DEFAULT_CONTROL = "http://127.0.0.1:8787"
 
 STATUS_SAMPLE_S = 15
 MAP_SAMPLE_S = 10
@@ -46,6 +47,7 @@ def _percentile(sorted_values: list[int], pct: float) -> int:
 class Bench:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
+        self.control = args.control
         self.outdir = Path(args.outdir)
         self.outdir.mkdir(parents=True, exist_ok=True)
         self.results: dict = {
@@ -64,7 +66,9 @@ class Bench:
     # -- engine API -----------------------------------------------------------
     def api(self, method: str, path: str, **kwargs):
         try:
-            resp = requests.request(method, f"{CONTROL}{path}", timeout=10, **kwargs)
+            resp = requests.request(
+                method, f"{self.control}{path}", timeout=10, **kwargs
+            )
             return resp
         except requests.RequestException as exc:
             self.results["errors"].append({"at": iso(), "api": path, "error": str(exc)})
@@ -169,6 +173,96 @@ class Bench:
         """Fetch a fresh IP and record it per tunnel+exit (kept for diagnostics)."""
         return self.bench_request(tunnel, mode)
 
+    # -- stability correlation -----------------------------------------------
+    def correlate_stability(self) -> dict:
+        """Join each request to the latest node-quality sample of its tunnel.
+
+        Probe-history rows carry the per-tunnel assigned node vector (availability,
+        score, tier) sampled every MAP_SAMPLE_S. Bucket success on tier-a share and
+        mean score so the ADR-0009 run can judge whether tier/score separates
+        request fate on the live pool.
+        """
+        samples: dict[str, list[dict]] = {}
+        for s in self.results["probe_history"]:
+            samples.setdefault(s["tunnel_id"], []).append(s)
+
+        correlated: list[dict] = []
+        for rec in self.results["per_request"]:
+            hist = samples.get(rec["tunnel_id"], [])
+            prev = next((s for s in reversed(hist) if s["at"] <= rec["at"]), None)
+            if prev is None or not prev.get("nodes"):
+                continue
+            nodes = prev["nodes"]
+            avail = [
+                n["availability"] for n in nodes if n.get("availability") is not None
+            ]
+            score = [n["score"] for n in nodes if n.get("score") is not None]
+            tiers = [n.get("tier") for n in nodes]
+            correlated.append(
+                {
+                    "at": rec["at"],
+                    "tunnel_id": rec["tunnel_id"],
+                    "success": rec["success"],
+                    "latency_ms": rec["latency_ms"],
+                    "tier_a_share": tiers.count("A") / max(len(tiers), 1),
+                    "mean_availability": statistics.fmean(avail) if avail else None,
+                    "min_availability": min(avail) if avail else None,
+                    "mean_score": statistics.fmean(score) if score else None,
+                }
+            )
+        self.results["stability"] = {"correlated": correlated}
+        return correlated
+
+    def stability_text(self) -> list[str] | None:
+        correlated = self.results.get("stability", {}).get("correlated", [])
+        if not correlated:
+            return None
+        ok = [c for c in correlated if c["success"]]
+        lines = ["", "stability correlation (request vs assigned node quality):"]
+        lines.append(
+            f"  requests correlated to a node sample: {len(correlated)} "
+            f"(ok {len(ok)}, {100.0 * len(ok) / len(correlated):.1f}%)"
+        )
+
+        def bucket(pairs: list[tuple[float, bool]]) -> str:
+            if not pairs:
+                return "  (no data)"
+            n = len(pairs)
+            wins = sum(1 for _, s in pairs if s)
+            return f"{wins}/{n} ({100.0 * wins / n:.0f}%)"
+
+        threes = [
+            (c["tier_a_share"], c["success"])
+            for c in correlated
+            if c["tier_a_share"] is not None
+        ]
+        lines.append("  ok-rate by tier-a share:")
+        for lo, hi, label in [
+            (0.0, 0.0, "tier_a_share == 0"),
+            (0.0, 0.5, "0 < tier_a_share <= 0.5"),
+            (0.5, 1.0, "0.5 < tier_a_share <= 1"),
+        ]:
+            if hi == 0.0:
+                rows = [p for p in threes if p[0] == 0.0]
+            else:
+                rows = [p for p in threes if lo < p[0] <= hi]
+            lines.append(f"    {label:<24}: {bucket(rows)}")
+
+        scored = [
+            (c["mean_score"], c["success"])
+            for c in correlated
+            if c["mean_score"] is not None
+        ]
+        if scored:
+            ordered = sorted(scored)
+            n = len(ordered)
+            q = max(n // 4, 1)
+            lines.append("  ok-rate by mean-score quartile:")
+            for i in range(4):  # noqa: PLR2004
+                band = ordered[i * q : (i + 1) * q if i < 3 else None]  # noqa: E203
+                lines.append(f"    q{i}: {bucket(band)}")
+        return lines
+
     # -- logs ------------------------------------------------------------------
     def capture_logs(self) -> None:
         try:
@@ -272,6 +366,12 @@ class Bench:
             sleep(60.0 / max(args.requests_per_min, 1))
 
         self.capture_logs()
+        self.correlate_stability()
+
+        if not args.keep_tunnels:
+            for t in created:
+                self.delete(t["id"])
+            self.results["tunnels_cleaned_up"] = True
 
     # -- report ----------------------------------------------------------------
     def write_report(self) -> str:
@@ -338,6 +438,10 @@ class Bench:
         if len(err_lines) > 30:
             text.append(f"  ... and {len(err_lines) - 30} more")
 
+        stability = self.stability_text()
+        if stability:
+            text.extend(stability)
+
         report = "\n".join(text)
         (self.outdir / "report.txt").write_text(report + "\n")
         (self.outdir / "results.json").write_text(json.dumps(self.results, indent=2))
@@ -360,6 +464,17 @@ def main() -> None:
     )
     parser.add_argument("--requests-per-min", type=int, default=6)
     parser.add_argument("--outdir", default="bench_out")
+    parser.add_argument(
+        "--control",
+        default=DEFAULT_CONTROL,
+        help="engine control API base URL (default 127.0.0.1:8787)",
+    )
+    parser.add_argument(
+        "--keep-tunnels",
+        action="store_true",
+        help="leave benchmark tunnels running after the run "
+        "(default: delete them once sampling finishes)",
+    )
     args = parser.parse_args()
     bench = Bench(args)
     bench.run()
