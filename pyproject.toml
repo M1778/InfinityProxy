@@ -23,7 +23,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["engine*"]
+include = ["engine*", "panel*"]
 
 [tool.ruff]
 line-length = 88

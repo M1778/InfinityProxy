@@ -49,6 +49,8 @@ class Engine:
         self._last_check: dict[str, float] = {}
         self._threads: list[threading.Thread] = []
         self._started_s = time.time()
+        self._refreshing: set[str] = set()
+        self._refresh_lock = threading.Lock()
 
     def start(self) -> None:
         seed_sources(self.store)
@@ -81,12 +83,34 @@ class Engine:
         for tunnel_id in expected:
             self.store.set_tunnel_state(tunnel_id, "running")
 
-    def refresh_source_now(self, name: str) -> bool:
+    def request_source_refresh(self, name: str) -> bool:
+        """Queue a source scrape on a background thread; never blocks the caller.
+
+        Single-flight per source name: concurrent requests are acknowledged but
+        do not stack a second scrape.
+        """
         source = source_by_name(name)
         if source is None:
             return False
-        refresh_source(self.store, self.settings, source)
+        with self._refresh_lock:
+            if name in self._refreshing:
+                return True
+            self._refreshing.add(name)
+        threading.Thread(
+            target=self._refresh_worker, args=(name,), name="panel-refresh", daemon=True
+        ).start()
         return True
+
+    def _refresh_worker(self, name: str) -> None:
+        try:
+            source = source_by_name(name)
+            if source is not None:
+                refresh_source(self.store, self.settings, source)
+        except Exception:  # noqa: BLE001 - a manual scrape must not kill the panel request
+            logger.warning("manual source refresh failed: %s", name, exc_info=True)
+        finally:
+            with self._refresh_lock:
+                self._refreshing.discard(name)
 
     def health_check(self, tunnel: Tunnel) -> tuple[int, int]:
         """One health pass for a tunnel. Returns (swapped, added)."""
@@ -248,7 +272,9 @@ class Engine:
                 "total": pool["total"],
                 "alive": pool["alive"],
                 "dead": pool["dead"],
+                "untested": pool["untested"],
                 "in_use": pool["in_use"],
+                "by_protocol": self.store.pool_by_protocol(),
                 "assignable": sum(
                     1
                     for n in self.store.load_nodes(

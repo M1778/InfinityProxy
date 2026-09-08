@@ -5,17 +5,33 @@ services:
     network_mode: host
     environment:
       INFINITY_HOST: ${INFINITY_HOST:-127.0.0.1}
-      INFINITY_PORT: ${INFINITY_PORT:-8000}
+      INFINITY_PORT: ${INFINITY_PORT:-8787}
       INFINITY_TUNNEL_RANGE: ${INFINITY_TUNNEL_RANGE:-10000-59999}
       INFINITY_BATCH_SIZE: ${INFINITY_BATCH_SIZE:-50}
       INFINITY_PROBE_TIMEOUT_MS: ${INFINITY_PROBE_TIMEOUT_MS:-4000}
       INFINITY_HEALTH_INTERVAL_S: ${INFINITY_HEALTH_INTERVAL_S:-30}
+      INFINITY_URTEST_INTERVAL_S: ${INFINITY_URTEST_INTERVAL_S:-30}
       INFINITY_MAX_MISSES: ${INFINITY_MAX_MISSES:-2}
       INFINITY_DB: /data/infinity.db
       INFINITY_SINGBOX_IMAGE: ${INFINITY_SINGBOX_IMAGE:-ghcr.io/sagernet/sing-box:v1.11.6}
+      INFINITY_PANEL_BASE_URL: ${INFINITY_PANEL_BASE_URL:-http://127.0.0.1:8000}
     volumes:
       - infinity-data:/data
       - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  panel:
+    build: .
+    image: infinityproxy-engine
+    network_mode: host
+    command: ["python", "-m", "panel"]
+    environment:
+      INFINITY_PANEL_HOST: ${INFINITY_PANEL_HOST:-127.0.0.1}
+      INFINITY_PANEL_PORT: ${INFINITY_PANEL_PORT:-8000}
+      INFINITY_ENGINE_URL: ${INFINITY_ENGINE_URL:-http://127.0.0.1:8787}
+      INFINITY_PANEL_TEST_URL: ${INFINITY_PANEL_TEST_URL:-https://api.ipify.org}
+    depends_on:
+      - engine
     restart: unless-stopped
 
 volumes:

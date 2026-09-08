@@ -6,9 +6,10 @@ WORKDIR /srv
 
 COPY pyproject.toml README.md LICENSE ./
 COPY engine ./engine
+COPY panel ./panel
 
 RUN pip install --no-cache-dir .
 
-EXPOSE 8000
+EXPOSE 8787 8000
 
 CMD ["python", "-m", "engine"]

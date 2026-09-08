@@ -82,9 +82,15 @@ attribution record.
 ## Interface terms
 
 **Control API**:
-The localhost REST/JSON interface on `127.0.0.1:8000` clients use to create,
+The localhost REST/JSON interface on `127.0.0.1:8787` clients use to create,
 renew, list, and destroy tunnels. Open and unauthenticated in v1 by design
 (see [ADR-0003](./docs/adr/0003-localhost-control-api.md)).
+
+**Panel**:
+The localhost web dashboard on `127.0.0.1:8000` that crawls the Control API,
+streams live pool/tunnel state over SSE, and proxies every engine action
+(create/test/renew/delete tunnels, refresh sources, browse nodes).
+Unauthenticated like the Control API (see [ADR-0007](./docs/adr/0007-web-panel.md)).
 
 **Proxy protocol**:
 The scheme a node speaks (VLESS, VMess, Shadowsocks SS/SSR, Trojan, TUIC,

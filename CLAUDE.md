@@ -10,9 +10,9 @@ free proxy nodes from public GitHub feeds, filters them for liveness, and spawns
 per-tunnel sing-box containers that rotate through the alive nodes. Stack: Python,
 Flask, SQLite, Docker, sing-box.
 
-**The repo has no source code yet.** The docs are the spec. If you're asked to
-implement, implement *against* these files — and any behaviour change must update
-them, too.
+**Implemented against the docs.** The engine (`engine/`) and web panel
+(`panel/`) ship here, and the docs in this repo remain the spec. Any behaviour
+change must update the docs/ADRs in the same change.
 
 ## Where things live
 
@@ -20,10 +20,11 @@ them, too.
 | --- | --- |
 | `README.md` | Entry point: what it is, 30-second how-it-works, quickstart |
 | `CONTEXT.md` | **Glossary — canonical domain vocabulary. Read it first.** |
-| `docs/architecture.md` | Components, request flow, renewal loop, SQLite schema, planned src layout |
+| `docs/architecture.md` | Components, request flow, renewal loop, SQLite schema, src layout |
 | `docs/api.md` | Control API endpoints, payloads, errors, env config table |
 | `docs/scraping.md` | Source manifest, fetch loop, dedup, liveness filter, attribution |
-| `docs/adr/` | 6 accepted decisions (per-tunnel containers, SQLite, localhost API, MIT+attribution, urltest rotation, relay-grade liveness) |
+| `docs/dashboard.md` | Panel architecture: SSE, charts, port layout |
+| `docs/adr/` | 7 accepted decisions (per-tunnel containers, SQLite, localhost API, MIT+attribution, urltest rotation, relay-grade liveness, web panel) |
 | `docs/benchmark.md` | Real-stack benchmark harness results: first 10-minute run findings |
 | `ROADMAP.md` | v1 surface + post-v1 ambitions and stated no's |
 | `CONTRIBUTING.md` | Build, test, CI, and contribution conventions |
@@ -37,8 +38,9 @@ Never call a tunnel a "proxy server" or a node a "server". Full rules in
 
 ## Key facts to not re-derive
 
-- Control API: `127.0.0.1:8000`, unauthenticated by design, localhost-only
-  (ADR-0003). Don't document or build remote exposure.
+- Control API: `127.0.0.1:8787`, unauthenticated by design, localhost-only
+  (ADR-0003). Panel: `127.0.0.1:8000`, same semantics (ADR-0007). Don't document
+  or build remote exposure for either.
 - Tunnel ports: `10000–59999` from `INFINITY_TUNNEL_RANGE`; credentials stable
   per tunnel, never change on renew.
 - Liveness: protocol handshake, batch 50, 4s timeout; per-tunnel health check

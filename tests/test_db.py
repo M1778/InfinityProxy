@@ -46,7 +46,13 @@ def store(tmp_path) -> Store:
 
 def test_schema_creation_and_idempotence(store: Store) -> None:
     assert store.tunnel_count() == 0
-    assert store.pool_counts() == {"total": 0, "alive": 0, "dead": 0, "in_use": 0}
+    assert store.pool_counts() == {
+        "total": 0,
+        "alive": 0,
+        "dead": 0,
+        "in_use": 0,
+        "untested": 0,
+    }
     assert store.sources_summary() == []
     store.create_schema()
     store.create_schema()
@@ -284,7 +290,13 @@ def test_pool_counts(store: Store) -> None:
             dead_id: ProbeResult(node_id=dead_id, alive=False),
         }
     )
-    assert store.pool_counts() == {"total": 4, "alive": 1, "dead": 1, "in_use": 0}
+    assert store.pool_counts() == {
+        "total": 4,
+        "alive": 1,
+        "dead": 1,
+        "in_use": 0,
+        "untested": 2,
+    }
 
     store.assign_nodes([alive_ids, dead_id, untested_id], "tu_a")
     assert store.pool_counts()["in_use"] == 1

@@ -3,8 +3,11 @@
 Status: **accepted**
 
 The control API (`POST/GET /tunnels`, `POST /tunnels/{id}/renew`,
-`DELETE /tunnels/{id}`, `GET /status`) binds to `127.0.0.1:8000` and is
-**unauthenticated** in v1.
+`DELETE /tunnels/{id}`, `GET /status`, `GET/POST /nodes`,
+`POST /sources/{name}/refresh`) binds to `127.0.0.1:8787` (default
+`INFINITY_PORT`) and is **unauthenticated** in v1. The web panel binds a second
+loopback listener on `127.0.0.1:8000` (default `INFINITY_PANEL_PORT`) and uses
+the same unauthenticated rules; it is documented in ADR-0007.
 
 This is deliberate. The API's job in v1 is to be driven by *local* processes on
 the same host, so loopback binding is the security boundary; adding auth now
@@ -20,6 +23,10 @@ loopback and the container does not publish the port externally.
 **Consequences:**
 - Anyone with shell access on the host already owns the tunnels; auth would not
   change that threat model.
-- The docs must keep reminding operators not to publish port 8000.
+- The docs must keep reminding operators not to publish the panel port
+  (8000) **or** the engine port (8787). Both default to loopback.
+- Port 8000 was chosen as the panel home because it is a common, memorable web
+  port; the engine moved to a less collision-prone 8787 when the dashboard left
+  the engine process. Neither port is a boundary — loopback binding is.
 - When remote control ships (roadmap: *tunnel-scoped API keys*), each key manages
   only its own tunnels — the localhost-unauthenticated semantics stay local.

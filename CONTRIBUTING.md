@@ -1,8 +1,8 @@
 # CONTRIBUTING.md
 
-Thanks for contributing. This project is docs-first: the repo currently ships
-the **specification** (README, `docs/`, `CONTEXT.md`, ADRs). Code lands against
-that spec, so keep the docs honest whenever you change behaviour.
+Thanks for contributing. This project is docs-first: the docs (README, `docs/`,
+`CONTEXT.md`, ADRs) are the spec and the code ships *against* them — so keep the
+docs honest whenever you change behaviour.
 
 ## Ground rules
 
@@ -16,13 +16,15 @@ that spec, so keep the docs honest whenever you change behaviour.
   reads itself; use comments for the non-obvious *why*.
 - **Follow the language** — English only, keep the tone plain and precise.
 
-## Repo layout (planned, per docs/architecture.md)
+## Repo layout
 
 ```text
-engine/          Flask control plane (API, scraper, filter, assigner, db)
+engine/          Flask control plane (API, scraper, filter, assigner, db, scheduler)
+panel/           Flask web dashboard (SSE snapshot stream, proxied actions, static frontend)
 tunnel-image/    sing-box image wrapping the tunnel runtime
-tests/           unit tests (parser, filter, assigner, allocator)
-docs/            architecture, api, scraping; adr/ decisions
+tools/           benchmark harness (prod_bench.py)
+tests/           unit tests (parser, filter, assigner, allocator, app, panel)
+docs/            architecture, api, scraping, dashboard; adr/ decisions
 CONTEXT.md       glossary
 README.md        entry point
 ROADMAP.md       v1 and post-v1 plan
@@ -36,7 +38,16 @@ pip install -e ".[dev]"
 cp .env.example .env   # if present; else rely on defaults in docs/api.md
 ```
 
-Run the engine and poke the control API on `127.0.0.1:8000`.
+Run the engine (control API, `127.0.0.1:8787`) and the panel (dashboard,
+`127.0.0.1:8000`) directly from the venv, or both via `docker compose up -d`:
+
+```bash
+python -m engine    # control API on 127.0.0.1:8787  (INFINITY_PORT)
+python -m panel     # dashboard on 127.0.0.1:8000    (INFINITY_PANEL_PORT)
+```
+
+`panel/` requires an engine reachable at `INFINITY_ENGINE_URL` (default
+`http://127.0.0.1:8787`).
 
 ## What's tested (and why not more)
 
@@ -48,6 +59,8 @@ top-up).
 Live node probing is **not** unit-tested and does not run in CI: free nodes
 churn and die between runs, so any integration test asserting real liveness is a
 flaky lie. Probe logic is exercised manually against the live engine instead.
+The panel backend *is* unit-tested against a fake engine client
+([ADR-0007](./docs/adr/0007-web-panel.md)) — no engine threads in tests.
 
 ```bash
 pytest            # unit tests
@@ -70,10 +83,12 @@ Flaky-network probes stay out of CI (see above).
 ## Docker
 
 - The Engine runs as one container; each tunnel is its own `sing-box` container
-  (see [ADR-0001](./docs/adr/0001-per-tunnel-containers.md)).
-- **Never publish `8000`** on the Engine in compose files or docs — the control
-  API is deliberately localhost-only
-  ([ADR-0003](./docs/adr/0003-localhost-control-api.md)).
+  (see [ADR-0001](./docs/adr/0001-per-tunnel-containers.md)). Compose also runs a
+  second `panel` service from the same image.
+- **Never publish the engine port (`8787`) or the panel port (`8000`) externally**
+  in compose files or docs — both are deliberately localhost-only
+  ([ADR-0003](./docs/adr/0003-localhost-control-api.md),
+  [ADR-0007](./docs/adr/0007-web-panel.md)).
 - Tunnel ports are allocated from `INFINITY_TUNNEL_RANGE` (default
   `10000-59999`).
 

@@ -237,6 +237,8 @@ class Store:
         source: str | None = None,
         limit: int | None = None,
         oldest_first: bool = False,
+        query: str | None = None,
+        in_use: bool | None = None,
     ) -> list[Node]:
         sql = "SELECT * FROM nodes"
         clauses: list[str] = []
@@ -250,10 +252,20 @@ class Store:
         if source is not None:
             clauses.append("source = ?")
             params.append(source)
+        if query:
+            clauses.append("(server LIKE ? OR node_id LIKE ?)")
+            like = f"%{query}%"
+            params.extend([like, like])
+        if in_use is not None:
+            clauses.append(
+                "assigned_to IS NOT NULL" if in_use else "assigned_to IS NULL"
+            )
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         if oldest_first:
             sql += " ORDER BY first_seen_s, node_id"
+        else:
+            sql += " ORDER BY state, last_latency_ms"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(limit)
@@ -297,13 +309,49 @@ class Store:
                     "SELECT COUNT(*) FROM nodes WHERE state = 'dead'"
                 ).fetchone()[0]
             )
+            untested = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM nodes WHERE state = 'untested'"
+                ).fetchone()[0]
+            )
             in_use = int(
                 self._conn.execute(
                     "SELECT COUNT(*) FROM nodes WHERE state = 'alive' "
                     "AND assigned_to IS NOT NULL"
                 ).fetchone()[0]
             )
-        return {"total": total, "alive": alive, "dead": dead, "in_use": in_use}
+        return {
+            "total": total,
+            "alive": alive,
+            "dead": dead,
+            "untested": untested,
+            "in_use": in_use,
+        }
+
+    def pool_by_protocol(self) -> list[dict[str, int | str]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT protocol,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN state = 'alive' THEN 1 ELSE 0 END) AS alive,
+                       SUM(CASE WHEN state = 'dead' THEN 1 ELSE 0 END) AS dead,
+                       SUM(CASE WHEN state = 'untested' THEN 1 ELSE 0 END) AS untested
+                FROM nodes
+                GROUP BY protocol
+                ORDER BY total DESC
+                """
+            ).fetchall()
+        return [
+            {
+                "protocol": r["protocol"],
+                "total": int(r["total"]),
+                "alive": int(r["alive"]),
+                "dead": int(r["dead"]),
+                "untested": int(r["untested"]),
+            }
+            for r in rows
+        ]
 
     def assign_nodes(self, node_ids: list[str], tunnel_id: str) -> None:
         # Single assigned_to column makes double-assignment impossible; a node

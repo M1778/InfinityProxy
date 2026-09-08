@@ -27,7 +27,7 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BENCHMARK_TARGET = "https://api.ipify.org"
-CONTROL = "http://127.0.0.1:8000"
+CONTROL = "http://127.0.0.1:8787"
 
 STATUS_SAMPLE_S = 15
 MAP_SAMPLE_S = 10

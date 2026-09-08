@@ -14,7 +14,11 @@ def _env_int(name: str, default: int) -> int:
 @dataclass(frozen=True)
 class Settings:
     host: str = "127.0.0.1"
-    port: int = 8000
+    port: int = 8787
+    panel_port: int = 8000
+    panel_host: str = "127.0.0.1"
+    engine_url: str = ""
+    panel_base_url: str = ""
     tunnel_port_start: int = 10000
     tunnel_port_end: int = 59999
     batch_size: int = 50
@@ -31,9 +35,19 @@ class Settings:
     def from_env(cls) -> "Settings":
         range_raw = os.environ.get("INFINITY_TUNNEL_RANGE", "10000-59999")
         start_s, _, end_s = range_raw.partition("-")
+        port = _env_int("INFINITY_PORT", 8787)
+        panel_port = _env_int("INFINITY_PANEL_PORT", 8000)
         return cls(
             host=os.environ.get("INFINITY_HOST", "127.0.0.1"),
-            port=_env_int("INFINITY_PORT", 8000),
+            port=port,
+            panel_port=panel_port,
+            panel_host=os.environ.get("INFINITY_PANEL_HOST", "127.0.0.1"),
+            engine_url=os.environ.get(
+                "INFINITY_ENGINE_URL", f"http://127.0.0.1:{port}"
+            ),
+            panel_base_url=os.environ.get(
+                "INFINITY_PANEL_BASE_URL", f"http://127.0.0.1:{panel_port}"
+            ),
             tunnel_port_start=_env_int("INFINITY_TUNNEL_RANGE_START", int(start_s)),
             tunnel_port_end=_env_int("INFINITY_TUNNEL_RANGE_END", int(end_s)),
             batch_size=_env_int("INFINITY_BATCH_SIZE", 50),

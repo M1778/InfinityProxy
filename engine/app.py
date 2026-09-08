@@ -6,12 +6,12 @@ import datetime as _dt
 import logging
 from typing import Any
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, redirect, request
 
 from engine.assigner import Assigner, PortExhausted
 from engine.config import Settings
 from engine.db import Store
-from engine.models import Tunnel
+from engine.models import Node, Tunnel
 from engine.scheduler import ASSIGNABLE_PROTOCOLS, Engine
 from engine.tunnel.config import render_config
 from engine.tunnel.container import ContainerController, TunnelRuntimeUnavailable
@@ -44,6 +44,66 @@ def create_app(
     @app.get("/status")
     def status():
         return jsonify(engine.engine_status())
+
+    @app.get("/nodes")
+    def list_nodes():
+        state = request.args.get("state")
+        source = request.args.get("source")
+        query = request.args.get("q")
+        in_use_raw = request.args.get("in_use")
+        in_use = {"1": True, "true": True, "0": False, "false": False}.get(
+            in_use_raw or "", None
+        )
+        protocols: set[str] = set()
+        for part in request.args.get("protocol", "").split(","):
+            if part.strip():
+                protocols.add(part.strip())
+        try:
+            limit = min(int(request.args.get("limit", 200)), 1000)
+        except (TypeError, ValueError):
+            return err("invalid_request", "limit must be an integer", 400)
+        if limit < 1:
+            return err("invalid_request", "limit must be >= 1", 400)
+        nodes = store.load_nodes(
+            state=state or None,
+            protocols=protocols or None,
+            source=source or None,
+            limit=limit,
+            query=query or None,
+            in_use=in_use,
+        )
+        in_use_ids = store.node_ids_in_use()
+        return jsonify(
+            {
+                "nodes": [_serialize_node(n, n.node_id in in_use_ids) for n in nodes],
+                "count": len(nodes),
+                "limit": limit,
+            }
+        )
+
+    @app.get("/nodes/<node_id>")
+    def node_detail(node_id: str):
+        node = store.get_node(node_id)
+        if node is None:
+            return err("not_found", f"no node {node_id}", 404)
+        detail = _serialize_node(node, node.node_id in store.node_ids_in_use())
+        detail["uri"] = node.uri
+        return jsonify(detail)
+
+    @app.post("/sources/<source_name>/refresh")
+    def refresh_source(source_name: str):
+        try:
+            queued = engine.request_source_refresh(source_name)
+        except Exception as exc:  # noqa: BLE001 - surface schedule failures to the operator
+            return err("source_refresh_failed", str(exc), 502)
+        if not queued:
+            return err("not_found", f"no source {source_name}", 404)
+        status = engine.engine_status()
+        entry = next(
+            (s for s in status["sources"] if s["name"] == source_name),
+            {"name": source_name, "last_fetch_s": None, "cadence_s": None},
+        )
+        return jsonify({**entry, "refreshing": True}), 202
 
     @app.get("/tunnels")
     def list_tunnels():
@@ -127,7 +187,7 @@ def create_app(
 
     @app.get("/")
     def dashboard():
-        return _render_dashboard(store, engine, settings)
+        return redirect(settings.panel_base_url, code=302)
 
     @app.errorhandler(Exception)
     def on_error(exc: Exception):  # type: ignore[no-untyped-def]
@@ -187,42 +247,15 @@ def _iso(timestamp: float) -> str:
     )
 
 
-def _render_dashboard(store: Store, engine: Engine, settings: Settings) -> str:
-    status = engine.engine_status()
-    tunnels = "\n".join(
-        f"<tr><td>{t.tunnel_id}</td><td>127.0.0.1:{t.port}</td>"
-        f"<td>{'yes' if t.auto_renew else 'no'}</td>"
-        f"<td>{t.node_count_granted}/{t.node_count_requested}</td>"
-        f"<td>{t.state}</td>"
-        f"<td>{'degraded' if t.degraded else 'ok'}</td></tr>"
-        for t in store.load_tunnels()
-    )
-    sources = "\n".join(
-        f"<tr><td>{s['name']}</td><td>{s['cadence_s']}s</td>"
-        f"<td>{s['last_fetch_s']}s ago</td></tr>"
-        for s in status["sources"]
-    )
-    pool = status["pool"]
-    return (
-        "<!doctype html><html><head><meta charset='utf-8'>"
-        f"<title>InfinityProxy</title><style>"
-        "body{font:14px/1.5 system-ui,PingFang SC,Microsoft YaHei,sans-serif;"
-        "margin:2rem auto;max-width:64rem;padding:0 1rem;color:#1a1a1a}"
-        "h1{font-size:1.4rem}table{border-collapse:collapse;width:100%}"
-        "th,td{border:1px solid #ddd;padding:.4rem .6rem;text-align:left}"
-        "th{background:#f5f5f5}.badge{color:#b45309;font-weight:600}</style></head><body>"
-        "<h1>InfinityProxy</h1>"
-        f"<p>Engine {status['engine']} · up {status['uptime_s']}s. "
-        f"Control API: 127.0.0.1:{settings.port} (localhost only, no auth).</p>"
-        "<h2>Pool</h2>"
-        f"<p>total {pool['total']} · alive {pool['alive']} · "
-        f"dead {pool['dead']} · in use {pool['in_use']} · "
-        f"assignable {pool['assignable']}</p>"
-        "<h2>Tunnels</h2>"
-        f"<table><tr><th>id</th><th>endpoint</th><th>auto renew</th>"
-        f"<th>granted/requested</th><th>state</th><th>status</th></tr>{tunnels}</table>"
-        "<h2>Sources</h2>"
-        f"<table><tr><th>name</th><th>cadence</th><th>last fetch</th>"
-        f"</tr>{sources}</table>"
-        "</body></html>"
-    )
+def _serialize_node(node: Node, in_use: bool) -> dict[str, Any]:
+    return {
+        "id": node.node_id,
+        "protocol": node.protocol,
+        "server": node.server,
+        "port": node.port,
+        "source": node.source,
+        "state": node.state,
+        "last_latency_ms": node.last_latency_ms,
+        "in_use": in_use,
+        "first_seen_s": _iso(node.first_seen_s),
+    }

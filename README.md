@@ -10,32 +10,38 @@ traffic through fresh, alive proxy nodes — with automatic renewal when nodes d
 
 - **Free** — nodes are scraped from public, auto-updated open-source feeds.
 - **Universal** — each tunnel is a sing-box listener that accepts **SOCKS5 and
-  HTTP (CONNECT)** and dials upstream over VLESS, VMess, Shadowsocks, Trojan,
-  TUIC, or Hysteria2.
+  HTTP (CONNECT)** and dials upstream over the sing-box dialects that survive a
+  real relay probe: VLESS, Trojan, Shadowsocks (AEAD), and occasionally
+  HTTP/SOCKS5 forward proxies. VMess, TUIC, Hysteria2 and SSR are scraped but
+  never certified (see
+  [Filtering policy](./docs/scraping.md#filtering-policy)).
 - **3D rotating** — rotation happens across three axes:
   [**time**](#rotation-axes), **node switching**, and **geo/protocol diversity**.
 - **Self-hosted** — runs in Docker; your nodes, your privacy. MIT licensed.
 
 ```text
-                ┌────────────────────────────────────────────────┐
-                │                  INFINITYPROXY                 │
-                │                                                │
-  public feeds  │   ┌────────────┐   ┌─────────────┐             │
- ─────────────► │   │ SCRAPER    │──►│ NODE POOL   │             │
-  github 5x     │   │ (batched)  │   │ (filtered)  │             │
-                │   └────────────┘   └──────┬──────┘             │
-                │                           │ healthy nodes      │
-                │              ┌────────────▼───────┐            │
-   SomeApp ───► │              │  PROXY ENGINE      │            │
-   POST /tunnels│              │  (Flask, :8000)    │            │
-                │              └───────┬────────────┘            │
-                │              spawns / renews / routes          │
-                │        ┌───────┴────────┐                      │
-                │        │  TUNNEL (sing- │  SOCKS5+HTTP, :PORT  │
-                │        │    box)        │◄──────────────────────┼── client
-                │        │  rotating      │  user:pass           │
-                │        └────────────────┘                      │
-                └────────────────────────────────────────────────┘
+                ┌────────────────────────────────────────────────────────┐
+                │                    INFINITYPROXY                       │
+                │                                                        │
+  public feeds  │   ┌────────────┐   ┌─────────────┐                     │
+ ─────────────► │   │  SCRAPER   │──►│  NODE POOL  │                     │
+  github 5x     │   │ (batched)  │   │  (filtered) │                     │
+                │   └────────────┘   └──────┬──────┘                     │
+                │                           │ healthy nodes              │
+                │            ┌──────────────▼─────────────┐              │
+   SomeApp ───► │            │      PROXY ENGINE (Flask)   │              │
+   POST /tunnels│            │      control API :8787      │              │
+                │            └──────┬────────────────────┬─┘              │
+                │                   │                    │ crawls         │
+                │        ┌──────────▼────────┐  ┌────────▼──────────┐     │
+                │        │  TUNNEL (sing-box) │  │  PANEL (Flask)   │     │
+                │        │   SOCKS5+HTTP      │  │   dashboard      │     │
+                │        │   rotating nodes   │  │   :8000          │     │
+                │        └───────┬────────────┘  └──────────────────┘     │
+                │                │                                        │
+                │   SOCKS5+HTTP   │   user:pass                           │
+                │◄───────────────┼────────────────────────────────────────│
+                └────────────────┴────────────────────────────────────────┘
 ```
 
 ## How it works — in 30 seconds
@@ -61,7 +67,7 @@ traffic through fresh, alive proxy nodes — with automatic renewal when nodes d
 | --- | --- | --- |
 | **Time** | Which nodes are assigned | Continuous renewal: dead nodes are replaced automatically as sources refresh |
 | **Node** | Which node a single request exits through | sing-box latency-weighted (`urltest`) outbound selection per request |
-| **Geo/protocol** | *Where* and *how* traffic exits | Nodes span many countries and protocols (VLESS/VMess/SS/Trojan/TUIC/Hy2), so each tunnel's address space is broad and churn is spread |
+| **Geo/protocol** | *Where* and *how* traffic exits | Nodes span many countries and protocols (VLESS/SS/Trojan), so each tunnel's address space is broad and churn is spread |
 
 ## Quick start
 
@@ -78,7 +84,7 @@ with 10 alive nodes:
 
 ```bash
 # 1. Ask the Engine for a tunnel
-curl -s -X POST http://127.0.0.1:8000/tunnels \
+curl -s -X POST http://127.0.0.1:8787/tunnels \
   -H 'Content-Type: application/json' \
   -d '{"node_count": 10, "auto_renew": true}'
 ```
@@ -105,11 +111,14 @@ curl -x http://u_5x2m:p_9q7z@127.0.0.1:10244 https://api.ipify.org
 curl --socks5-hostname u_5x2m:p_9q7z@127.0.0.1:10244 https://api.ipify.org
 
 # 3. Tear it down when done
-curl -s -X DELETE http://127.0.0.1:8000/tunnels/tu_8f3k9a
+curl -s -X DELETE http://127.0.0.1:8787/tunnels/tu_8f3k9a
 ```
 
-> **Note:** the Engine listens on `127.0.0.1:8000` — localhost only, no auth, by
-> design in v1. Don't publish it to the network.
+> **Note:** the Engine listens on `127.0.0.1:8787` and the web panel on
+> `127.0.0.1:8000` — both localhost only, no auth, by design in v1. Open the
+> panel in a browser to watch live pool/tunnel graphs and to drive every
+> action below with buttons (create/test/renew/delete tunnels, refresh
+> sources, browse nodes). Don't publish either port to the network.
 
 ## Configuration
 
@@ -118,7 +127,9 @@ Everything is overridable via environment variables (see
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `INFINITY_PORT` | `8000` | Engine control API + dashboard port |
+| `INFINITY_PORT` | `8787` | Engine control API port |
+| `INFINITY_PANEL_PORT` | `8000` | Web panel port |
+| `INFINITY_ENGINE_URL` | `http://127.0.0.1:8787` | Panel → engine base URL |
 | `INFINITY_TUNNEL_RANGE` | `10000-59999` | Ports available for tunnels |
 | `INFINITY_BATCH_SIZE` | `50` | Concurrent liveness probes |
 | `INFINITY_PROBE_TIMEOUT_MS` | `4000` | Liveness handshake timeout |
@@ -141,6 +152,7 @@ The pool is built from these public, auto-updated feeds (full details in
 - [**Architecture**](./docs/architecture.md) — components, request flow, renewal loop, SQLite schema
 - [**API reference**](./docs/api.md) — endpoints, payloads, errors, configuration
 - [**Scraping & filtering**](./docs/scraping.md) — sources, batching, liveness, dedup
+- [**Dashboard & panel**](./docs/dashboard.md) — web panel architecture and port layout
 - [**Glossary**](./CONTEXT.md) — canonical project vocabulary
 - [**Architecture decisions**](./docs/adr/) — why things are the way they are
 - [**Roadmap**](./ROADMAP.md) — what's planned next

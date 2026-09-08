@@ -1,15 +1,18 @@
 # ROADMAP.md · InfinityProxy
 
-Status of this roadmap: the docs are the spec; nothing is implemented yet. This
-file lists the v1 surface (implemented in docs) and the post-v1 ambitions that
-survived the design interview. Unstated ideas are deliberately not here.
+Status of this roadmap: v1 is implemented (engine + panel + CI deployed) and this
+file lists the shipped v1 surface, the post-v1 ambitions that survived the design
+interview, and stated no's. Unstated ideas are deliberately not here.
 
-## v1 (specified in the docs)
+## v1 (implemented)
 
 - Engine with 5-source scraper, liveness filter (batch 50 / 4s), exclusive node
   assignment.
-- Control API on `127.0.0.1:8000`: `POST/GET /tunnels`, `POST /tunnels/{id}/renew`,
-  `DELETE /tunnels/{id}`, `GET /status`; read-only dashboard.
+- Control API on `127.0.0.1:8787`: `POST/GET /tunnels`, `POST /tunnels/{id}/renew`,
+  `DELETE /tunnels/{id}`, `GET /status`, `GET /nodes`, `POST /sources/{name}/refresh`.
+- Web panel on `127.0.0.1:8000`: live pool/tunnel graphs (SSE + Chart.js), create /
+  test / renew / delete tunnels, browse nodes, refresh sources. See
+  [docs/dashboard.md](./docs/dashboard.md).
 - Per-tunnel sing-box containers (SOCKS5 + HTTP inbound, stable credentials,
   latency-weighted rotation via sing-box `urltest`).
 - Automatic renewal: 30s health checks, swap after 2 strikes, degraded tunnels
@@ -37,8 +40,10 @@ without exposing other tenants' tunnels. Resolves the
 [ADR-0003](./docs/adr/0003-localhost-control-api.md) "path forward".
 
 ### Interactive dashboard
-Move the read-only dashboard toward full tunnel management: create, delete,
-force-renew, and inspect node latency live from the browser.
+**Shipped** — the panel (port 8000) is a full management surface: create, delete,
+force-renew, test a tunnel's egress, browse the node pool with filters, and
+refresh any source, all live from the browser. Remaining ideas that are *not* in
+the panel yet: per-tunnel connection graphs and historical latency per node.
 
 ### Relay-grade liveness v2
 Real per-protocol relay handshakes replace the TCP-dial-plus-hello v1 probe;

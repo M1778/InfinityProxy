@@ -38,6 +38,7 @@ def _settings(tmp_path) -> Settings:
         port=8000,
         db_path=str(tmp_path / "test.db"),
         engine_name_prefix="inf-test",
+        panel_base_url="http://127.0.0.1:8000",
     )
 
 
@@ -65,7 +66,16 @@ def test_status_ok(client):
     assert res.status_code == 200
     body = res.get_json()
     assert body["engine"] == "ok"
-    assert set(body["pool"]) == {"total", "alive", "dead", "in_use", "assignable"}
+    assert set(body["pool"]) == {
+        "total",
+        "alive",
+        "dead",
+        "untested",
+        "in_use",
+        "assignable",
+        "by_protocol",
+    }
+    assert body["pool"]["by_protocol"] == []
     assert body["tunnels"]["active"] == 0
 
 
@@ -146,9 +156,100 @@ def test_delete_tunnel(client):
     assert store.get_tunnel(created["id"]) is None
 
 
-def test_dashboard_renders(client):
+def test_dashboard_redirects_to_panel(client):
     test, _, _ = client
     res = test.get("/")
+    assert res.status_code == 302
+    assert res.headers["Location"] == "http://127.0.0.1:8000"
+
+
+def _seed_nodes(store: Store) -> None:
+    from engine.models import NodeCandidate, ProbeResult
+
+    store.upsert_candidates(
+        [
+            NodeCandidate(
+                uri="vless://a@1.2.3.4:443?type=tcp",
+                protocol="vless",
+                server="1.2.3.4",
+                port=443,
+                user=None,
+                source="src_a",
+            ),
+            NodeCandidate(
+                uri="ss://method:pass@5.6.7.8:8388",
+                protocol="ss",
+                server="5.6.7.8",
+                port=8388,
+                user=None,
+                source="src_b",
+            ),
+        ]
+    )
+    nodes = store.load_nodes(state="untested")
+    store.apply_probe_results(
+        {n.node_id: ProbeResult(n.node_id, alive=n.server == "1.2.3.4") for n in nodes}
+    )
+    return nodes
+
+
+def test_nodes_list_filters(client):
+    test, store, _ = client
+    nodes = _seed_nodes(store)
+    vless = next(n for n in nodes if n.protocol == "vless")
+    ss = next(n for n in nodes if n.protocol == "ss")
+
+    res = test.get("/nodes")
     assert res.status_code == 200
-    assert "InfinityProxy" in res.get_data(as_text=True)
-    assert "Control API" in res.get_data(as_text=True)
+    body = res.get_json()
+    assert body["count"] == 2
+    assert {"protocol", "state", "last_latency_ms", "in_use", "source"} <= set(
+        body["nodes"][0]
+    )
+
+    assert test.get("/nodes?state=alive").get_json()["count"] == 1
+    assert (
+        test.get(f"/nodes?state=alive&protocol={vless.protocol}").get_json()["count"]
+        == 1
+    )
+    assert test.get("/nodes?source=src_b").get_json()["count"] == 1
+    assert test.get("/nodes?limit=1").get_json()["count"] == 1
+    found_by_q = test.get(f"/nodes?q={ss.server}").get_json()
+    assert found_by_q["count"] == 1 and found_by_q["nodes"][0]["protocol"] == "ss"
+    assert test.get("/nodes?in_use=1").get_json()["count"] == 0
+
+    store.assign_nodes([vless.node_id], "tu_x")
+    in_use = test.get("/nodes?in_use=1").get_json()
+    assert in_use["count"] == 1 and in_use["nodes"][0]["id"] == vless.node_id
+
+
+def test_nodes_detail_and_not_found(client):
+    test, store, _ = client
+    node = _seed_nodes(store)[0]
+    res = test.get(f"/nodes/{node.node_id}")
+    assert res.status_code == 200
+    assert res.get_json()["uri"].startswith("vless://")
+    assert test.get("/nodes/doesnotexist").status_code == 404
+
+
+def test_source_refresh(client, monkeypatch):
+    test, _, _ = client
+    engine = app_engine(test)
+    monkeypatch.setattr(engine, "request_source_refresh", lambda n: n == "ok_src")
+    assert test.post("/sources/unknown/refresh").status_code == 404
+    res = test.post("/sources/ok_src/refresh")
+    assert res.status_code == 202
+    assert res.get_json()["name"] == "ok_src"
+    assert res.get_json()["refreshing"] is True
+
+    def boom(_n):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(engine, "request_source_refresh", boom)
+    res = test.post("/sources/ok_src/refresh")
+    assert res.status_code == 502
+    assert res.get_json()["error"]["code"] == "source_refresh_failed"
+
+
+def app_engine(test):
+    return test.application.engine

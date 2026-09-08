@@ -12,21 +12,24 @@ renewal, and port/credential bookkeeping — while each **tunnel** is a single
 sing-box container that exposes a rotating proxy endpoint to a client.
 
 ```text
-                    ┌──────────────────── ENGINE (Flask :8000) ────────────────────┐
+                    ┌──────────────────── ENGINE (Flask :8787) ────────────────────┐
                     │                                                              │
 Public feeds ─────► │  Scraper loop ─► Node pool ─► Liveness filter ─► Assigner    │
                     │       │                 │                        │            │
                     │       └── SQLite (state)◄┘                        │            │
                     │                                                   │            │
-                    │  Control API (tunnels CRUD + status)              │            │
-                    │  Dashboard (read-only HTML/CSS)                   │            │
-                    └──────────────────────────────────────────────────────────────┘
-                                               │ render config, spawn/restart/stop
-                                               ▼
-                    ┌───────────────── TUNNEL (sing-box container) ────────────────┐
-                    │  inbound: SOCKS5 + HTTP (user:pass)  ←────────────── client  │
-                    │  outbound: latency-weighted urltest over k assigned nodes    │
-                    └──────────────────────────────────────────────────────────────┘
+                    │  Control API (tunnels CRUD, nodes, status)        │            │
+                    │  GET / → 302 to the panel                         │            │
+                    └────────┬──────────────────────────────┬──────────────────────┘
+                             │ render config, spawn/restart │  crawl status/tunnels
+                             │ /stop per tunnel             │  every 5s
+                             ▼                              ▼
+                    ┌──────────────────── TUNNEL ────────────────────┐  ┌───────────────┐
+                    │  sing-box container, SOCKS5 + HTTP inbound     │  │ PANEL (Flask  │
+                    │  (user:pass) ←────────────── client            │  │  :8000)       │
+                    │  outbound: urltest over k assigned nodes       │  │  SSE stream,  │
+                    └────────────────────────────────────────────────┘  │  charts       │
+                                                                       └───────────────┘
 ```
 
 ## Components
@@ -43,10 +46,11 @@ Public feeds ─────► │  Scraper loop ─► Node pool ─► Livene
   time-boxed (default batch 50, 4s timeout). Verdicts are written to the store
   batch-by-batch, so alive nodes surface while a full source pass still runs.
 - **Assigner** — hands each new tunnel an exclusive private set of alive nodes.
-- **Control API** — Flask REST endpoints on `127.0.0.1:8000` (see
-  [docs/api.md](./api.md)).
-- **Dashboard** — same Flask app serves a read-only HTML/CSS inspector of
-  tunnels and pool health.
+- **Control API** — Flask REST endpoints on `127.0.0.1:8787` (see
+  [docs/api.md](./api.md)). `GET /` redirects to the panel.
+- **Panel** — a second Flask process (`python -m panel`) on `127.0.0.1:8000`
+  crawls the control API every 5s, keeps a 2h rolling history, and streams a
+  snapshot to the browser over SSE (see [docs/dashboard.md](./dashboard.md)).
 
 ### Tunnels
 
@@ -101,7 +105,7 @@ filter loop within one cadence.
 ```mermaid
 sequenceDiagram
     participant App as SomeApp
-    participant API as Engine control API (:8000)
+    participant API as Engine control API (:8787)
     participant E as Engine core
     participant P as Node pool
     participant S as sing-box container
@@ -160,31 +164,37 @@ The Engine never queues or blocks a create request on the pool.
 
 ## Ports, addresses, and security boundary
 
-- Control API + dashboard: `127.0.0.1:8000`, **localhost-only, no auth in v1**.
-  See [ADR-0003](./adr/0003-localhost-control-api.md). Mind that your public
-  network is not published to Docker by default (see
+- Engine control API: `127.0.0.1:8787`, **localhost-only, no auth in v1** — see
+  [ADR-0003](./adr/0003-localhost-control-api.md).
+- Web panel: `127.0.0.1:8000`, same localhost-only rule — see
+  [ADR-0007](./adr/0007-web-panel.md) and [docs/dashboard.md](./dashboard.md).
+- Mind that your public network is not published to Docker by default (see
   [CONTRIBUTING.md](../CONTRIBUTING.md)).
 - Tunnels: one published port each, from `INFINITY_TUNNEL_RANGE`. Each tunnel
   binds its port and authenticates clients with per-tunnel credentials.
 - Tunnel containers have **no** route to the Engine's control port; they only
   receive their rendered config and dial outbound.
 
-## Planned repository layout
-
-When code lands, it will follow this layout (specified here because the docs
-are the spec):
+## Repository layout
 
 ```text
 InfinityProxy/
 ├── engine/                   # Flask control plane
-│   ├── app.py                #   API + dashboard routes
+│   ├── app.py                #   control API routes
+│   ├── scheduler.py          #   renewal loop, health checks
 │   ├── scraper/              #   per-source fetchers + parsers
 │   ├── filter/               #   liveness probing, batch logic
 │   ├── assigner.py           #   exclusive node allocation
 │   ├── tunnel/               #   sing-box config rendering + container control
 │   └── db.py                 #   SQLite access
+├── panel/                    # Flask web dashboard
+│   ├── app.py                #   SSE stream, proxied actions, test-tunnel
+│   ├── client.py             #   engine API client
+│   ├── history.py            #   rolling chart history
+│   └── static/               #   zero-build frontend + vendored Chart.js
 ├── tunnel-image/             # Docker image wrapping sing-box for tunnels
-├── tests/                    # unit tests (parser, filter, assigner)
+├── tools/                    # benchmark harness
+├── tests/                    # unit tests (parser, filter, assigner, app, panel)
 ├── docs/
 ├── CONTEXT.md
 └── ...
@@ -199,3 +209,5 @@ Relevant architecture decision records:
 - [0003 Localhost control API](./adr/0003-localhost-control-api.md)
 - [0004 MIT with upstream attribution](./adr/0004-mit-and-attribution.md)
 - [0005 Latency-weighted rotation](./adr/0005-latency-weighted-rotation.md)
+- [0006 Certified liveness v2 (probe policy)](./adr/0006-relay-grade-liveness-probes.md)
+- [0007 Web panel (localhost, unauthenticated)](./adr/0007-web-panel.md)
