@@ -63,6 +63,12 @@ ruff format --check .   # formatting
 docker compose up -d    # run the engine (once code exists)
 ```
 
+Write-time quality gate (opencode): `.opencode/plugins/python-quality.ts`
+auto-formats every edited `.py` file with `ruff format`, reports leftover `ruff
+check` violations, and blocks edits that loosen linter rules (protected configs
+and the `[tool.ruff]` section of `pyproject.toml`). Restart opencode to pick up
+plugin changes; the running session does not hot-reload them.
+
 ## Conventions
 
 - Use glossary terms verbatim in code, logs, and docs.
