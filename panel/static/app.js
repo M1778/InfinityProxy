@@ -573,7 +573,7 @@ function renderHostTargets(tunnels, pickId) {
     tunnels
       .map((t) => {
         const lat = t.latency_ms != null ? `${t.latency_ms} ms` : "no data";
-        return `<option value="${esc(t.tunnel)}">${esc(t.tunnel.slice(0, 12))}… :${t.port} ${lat}</option>`;
+        return `<option value="${esc(t.id)}">${esc(t.id.slice(0, 12))}… :${t.port} ${lat}</option>`;
       })
       .join("");
   const kept = [...sel.options].some((o) => o.value === current)
@@ -592,7 +592,7 @@ function renderHostTable(rows) {
   body.innerHTML = rows
     .map(
       (m) => `<tr>
-        <td class="mono">${esc(m.tunnel || m.id)}</td>
+        <td class="mono">${esc(m.id || m.tunnel)}</td>
         <td class="mono">127.0.0.1:${m.port}</td>
         <td class="mono">${m.latency_ms != null ? m.latency_ms + " ms" : "—"}</td>
         <td class="mono">${m.throughput_kb_s != null ? Math.round(m.throughput_kb_s) + " KiB/s" : "—"}</td>

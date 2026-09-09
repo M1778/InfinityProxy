@@ -198,15 +198,24 @@ def test_status_merges_target_tunnels_from_endpoint(tmp_path):
     session = FakeAgentSession()
     session.agent_payload = {
         "hostagent": {"available": True, "uptime_s": 12},
+        "platform": {
+            "system": "linux",
+            "machine": "x86_64",
+            "docker": True,
+            "tun": True,
+        },
+        "capabilities": {"proxy": "gsettings", "tun": True},
         "proxy": {"enabled": True, "endpoint": "127.0.0.1:20001", "mode": "manual"},
         "tun": {"enabled": False, "endpoint": None, "iface": "tun0", "running": False},
     }
     controller = HostController(_settings(tmp_path), session=session)
     status = controller.status([_tunnel("tu_a", 20001), _tunnel("tu_b", 20002)])
     assert status["hostagent"]["available"] is True
+    assert status["hostagent"]["capabilities"]["proxy"] == "gsettings"
+    assert status["hostagent"]["platform"]["docker"] is True
     assert status["proxy"]["tunnel"] == "tu_a"
     assert status["tun"]["tunnel"] is None
-    assert {c["tunnel"] for c in status["tunnels"]} == {"tu_a", "tu_b"}
+    assert {c["id"] for c in status["tunnels"]} == {"tu_a", "tu_b"}
 
 
 def test_set_proxy_and_tun_happy_path(tmp_path):

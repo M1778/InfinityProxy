@@ -135,13 +135,12 @@ class HostController:
             cached = self._measure.get(t.tunnel_id)
             candidates.append(
                 {
-                    "tunnel": t.tunnel_id,
+                    "id": t.tunnel_id,
                     "host": "127.0.0.1",
                     "port": t.port,
                     "username": t.username,
                     "latency_ms": cached["latency_ms"] if cached else None,
                     "throughput_kb_s": cached["throughput_kb_s"] if cached else None,
-                    "measured_at_s": cached["at_s"] if cached else None,
                 }
             )
         return candidates
@@ -257,6 +256,8 @@ class HostController:
             return {
                 "hostagent": {
                     "available": False,
+                    "platform": None,
+                    "capabilities": None,
                     "error": f"hostagent unreachable at {self._settings.hostagent_url}",
                 },
                 "proxy": None,
@@ -267,7 +268,11 @@ class HostController:
         proxy_target = self._endpoint_tunnel(host_state.get("proxy"), tunnels)
         tun_target = self._endpoint_tunnel(host_state.get("tun"), tunnels)
         return {
-            "hostagent": host_state.get("hostagent"),
+            "hostagent": {
+                **host_state.get("hostagent", {}),
+                "platform": host_state.get("platform"),
+                "capabilities": host_state.get("capabilities"),
+            },
             "proxy": {**host_state.get("proxy", {}), "tunnel": proxy_target},
             "tun": {**host_state.get("tun", {}), "tunnel": tun_target},
             "tunnels": self._candidates(tunnels),

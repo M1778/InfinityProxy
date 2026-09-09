@@ -545,9 +545,10 @@ def docs_panel(tmp_path, monkeypatch):
 
 def test_docs_redirects_to_architecture(docs_panel):
     test, _ = docs_panel
-    res = test.get("/docs")
-    assert res.status_code == 302
-    assert res.headers["Location"] == "/docs/architecture"
+    for path in ("/docs", "/docs/"):
+        res = test.get(path)
+        assert res.status_code == 302
+        assert res.headers["Location"] == "/docs/architecture"
 
 
 def test_docs_page_renders_markdown(docs_panel):

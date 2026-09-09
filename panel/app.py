@@ -147,6 +147,10 @@ def create_app(
     def docs_index():
         return redirect("/docs/architecture", code=302)
 
+    @app.get("/docs/")
+    def docs_index_slash():
+        return redirect("/docs/architecture", code=302)
+
     @app.get("/docs/<name>")
     def docs_page(name: str):
         entry = _docs.find_doc(name, doc_source)
