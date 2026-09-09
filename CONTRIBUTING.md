@@ -70,13 +70,15 @@ ruff format --check .   # formatting
 
 ## GitHub Actions CI
 
-Three workflows ship with the implementation:
+Four workflows ship with the implementation:
 
-1. **test** — `pytest` on every PR (matrix across supported Python versions).
-2. **lint** — `ruff check` + `ruff format --check` on every PR.
+1. **test** — `pytest` on every push/PR (matrix across supported Python versions).
+2. **lint** — `ruff check` + `ruff format --check` on every push/PR.
 3. **build-push** — build `engine` and `tunnel` images and push to GHCR on
    version tags (`v*`). Includes a `docker build --check`-style config lint where
    the toolchain supports it.
+4. **pages** — rebuild the static dashboard demo to GitHub Pages on every push
+   to `master`. See [docs/dashboard.md](./docs/dashboard.md#demo-build-github-pages).
 
 Flaky-network probes stay out of CI (see above).
 

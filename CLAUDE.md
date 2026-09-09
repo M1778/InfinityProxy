@@ -24,7 +24,7 @@ change must update the docs/ADRs in the same change.
 | `docs/api.md` | Control API endpoints, payloads, errors, env config table |
 | `docs/scraping.md` | Source manifest, fetch loop, dedup, liveness filter, attribution |
 | `docs/dashboard.md` | Panel architecture: SSE, charts, port layout |
-| `docs/adr/` | 8 accepted decisions (per-tunnel containers, SQLite, localhost API, MIT+attribution, urltest rotation, relay-grade liveness, web panel, throughput-certified pool, stability-scored assignment) |
+| `docs/adr/` | 10 accepted decisions (0001–0010: per-tunnel containers, SQLite, localhost API, MIT+attribution, urltest rotation, relay-grade liveness, web panel, throughput-certified pool, stability-scored assignment, hostagent) |
 | `docs/benchmark.md` | Real-stack benchmark harness results: first 10-minute run findings |
 | `ROADMAP.md` | v1 surface + post-v1 ambitions and stated no's |
 | `CONTRIBUTING.md` | Build, test, CI, and contribution conventions |
@@ -75,14 +75,15 @@ Never call a tunnel a "proxy server" or a node a "server". Full rules in
 pytest                  # unit tests
 ruff check .            # lint
 ruff format --check .   # formatting
-docker compose up -d    # run the engine (once code exists)
+docker compose up -d    # run the engine + panel
 ```
 
-Write-time quality gate (opencode): `.opencode/plugins/python-quality.ts`
-auto-formats every edited `.py` file with `ruff format`, reports leftover `ruff
-check` violations, and blocks edits that loosen linter rules (protected configs
-and the `[tool.ruff]` section of `pyproject.toml`). Restart opencode to pick up
-plugin changes; the running session does not hot-reload them.
+Write-time quality gate (opencode, local-only, not in the repo):
+`.opencode/plugins/python-quality.ts` auto-formats every edited `.py` file with
+`ruff format`, reports leftover `ruff check` violations, and blocks edits that
+loosen linter rules (protected configs and the `[tool.ruff]` section of
+`pyproject.toml`). Restart opencode to pick up plugin changes; the running
+session does not hot-reload them.
 
 ## Conventions
 

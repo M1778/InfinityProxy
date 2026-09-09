@@ -122,7 +122,7 @@ assignable slice of the pool even when a node is never assigned. Counters fold
 (halve) when a verdict arrives more than an hour after the counter window
 opened, and a node whose verdicts age past 6 hours drops from Tier A to Tier B
 until re-probed. The survival schema details live in
-[architecture.md](./architecture.md#node-pool).
+[architecture.md](./architecture.md#sqlite-store).
 
 - Candidates queue through the filter in batches of 50; each node has 4s to
   complete a handshake.

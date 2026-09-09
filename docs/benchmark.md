@@ -146,21 +146,26 @@ node it probes that node each cadence and the `working_set` count in `GET
 
 ## Outstanding, tracked for a future change
 
-- Liveness still certifies any echoing TCP port. A real per-protocol relay
-  handshake is the documented v2 filter; until it lands, the pool will keep
-  admitting dead-ends and tunnels will route through them.
+Two findings from the first runs are **resolved** and no longer outstanding: the
+echo-TCP liveness model that "certified any open port" was replaced by the
+per-protocol relay handshakes of [ADR-0006](./adr/0006-relay-grade-liveness-probes.md)
+(see [docs/scraping.md](./scraping.md#liveness-filter)), and the lack of
+container-level health was closed by the scheduler's container self-heal
+(`restarts_24h`, redeploy a stopped container; see
+[architecture.md](./architecture.md#renewal-loop-the-time-axis)).
+
+What remains open:
+
 - **Failure attribution is invisible today**: the `url-test` outbound hides which
   node failed (logs say `outbound/rotator`, not the node), so even when sing-box
   reports a relay error like `unknown version: 72` the engine cannot demote the
   offender. A per-node outbound with dial-time fallback (load-balance, not
   urltest, per connection) trades a little latency optimality for a name we can
-  act on — the overdue amendment to ADR-0005.
-- No container-level health: a crash-looping tunnel container is not swapped
-  because node probes keep passing. The scheduler needs to also treat a
-  non-running tunnel container as a health miss.
+  act on — the overdue amendment to ADR-0005. Tracked in
+  [ROADMAP](../ROADMAP.md#tunneled-failure-attribution).
 - Free feeds are overwhelmingly stale or hostile (25,729 scraped → ~3,100
   pass port-open liveness → 0/44 relayed within the window). Relay-grade
-  abduction still certifies sparsley: a 20-minute window over a v2-certified
+  probing still certifies sparsely: a 20-minute window over a v2-certified
   pool relayed 42/444 total, and 0/74 across two ws-transport-populated
   tunnels (the ws guard in ADR-0006 now rejects those at probe time). Expect
   low success rates from any pool regardless of engine correctness.

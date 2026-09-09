@@ -116,8 +116,8 @@ curl -s -X DELETE http://127.0.0.1:8787/tunnels/tu_8f3k9a
 
 > **Note:** the Engine listens on `127.0.0.1:8787` and the web panel on
 > `127.0.0.1:8000` — both localhost only, no auth, by design in v1. Open the
-> panel in a browser to watch live pool/tunnel graphs and to drive every
-> action below with buttons (create/test/renew/delete tunnels, refresh
+> panel in a browser to watch live pool/tunnel graphs and to drive every action
+> in this guide with buttons (create/test/renew/delete tunnels, refresh
 > sources, browse nodes). Don't publish either port to the network.
 
 ## Configuration

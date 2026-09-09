@@ -119,22 +119,6 @@ the build steps.
 | `GET /status` | `pool` gains `untested` and `by_protocol` (counts per protocol), computed with SQL GROUP BY — no node table shipped per poll |
 | `GET /host` / `POST /host/pick` / `POST /host/proxy` / `POST /host/tun` | host-wide System Proxy + TUN control via the hostagent (ADR-0010; `409 host_features_disabled` when `INFINITY_HOST_ENABLED` is `0`) |
 
-## Steps (plan-orchestrate decomposition)
-
-1. **Engine API extensions** — impl. `/nodes`, source refresh, redirect, status
-   distributions; update api.md; tests.
-2. **Port layout** — migration. New defaults + env, compose services, .env.example,
-   ADR-0003 note, README, api.md config table.
-3. **Panel backend** — impl. `panel/` package: engine client, snapshot assembler
-   + ring buffer, SSE stream, proxy actions, test-tunnel. Tests with an injected
-   fake engine client (no engine threads in tests).
-4. **Frontend** — impl. Vendored Chart.js, dark theme, four views (Overview,
-   Tunnels, Nodes, Sources), live charts, actions with toasts/modals.
-5. **Docs pass** — docs. README quickstart (ports), ROADMAP dashboard note,
-   CONTRIBUTING run commands.
-6. **Build + verify** — build. ruff + pytest green; compose build/deploy; live
-   verify snapshot/SSE/actions; commit doc-first.
-
 ## Out of scope
 
 - Panel authentication / non-loopback deployment (ADR-0003 governance).
