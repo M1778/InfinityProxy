@@ -135,17 +135,17 @@ let chartThemeApplied = false;
 function applyChartTheme() {
   if (chartThemeApplied || !window.Chart) return;
   chartThemeApplied = true;
-  Chart.defaults.color = "#7d92a5";
-  Chart.defaults.borderColor = "#1e2a35";
-  Chart.defaults.font = { family: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size: 11 };
+  Chart.defaults.color = "#8fa3a0";
+  Chart.defaults.borderColor = "#1d272c";
+  Chart.defaults.font = { family: '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', size: 10.5 };
   Chart.defaults.animation = false;
-  Chart.defaults.scale.grid.color = "#151d26";
+  Chart.defaults.scale.grid.color = "#11181c";
   Chart.defaults.plugins.legend.position = "bottom";
   Chart.defaults.plugins.legend.labels.usePointStyle = true;
   Chart.defaults.plugins.legend.labels.boxWidth = 6;
-  Chart.defaults.plugins.legend.labels.color = "#7d92a5";
-  Chart.defaults.plugins.tooltip.backgroundColor = "rgba(16,22,29,.95)";
-  Chart.defaults.plugins.tooltip.borderColor = "#1e2a35";
+  Chart.defaults.plugins.legend.labels.color = "#8fa3a0";
+  Chart.defaults.plugins.tooltip.backgroundColor = "rgba(12,16,19,.96)";
+  Chart.defaults.plugins.tooltip.borderColor = "#2c3a3f";
   Chart.defaults.plugins.tooltip.borderWidth = 1;
   Chart.defaults.plugins.tooltip.cornerRadius = 8;
   Chart.defaults.plugins.tooltip.padding = 10;
@@ -189,12 +189,12 @@ function redrawCharts() {
     state.panels.pool = new Chart($("#pool-chart"), {
       type: "line",
       data: { datasets: [
-        { label: "dead", data: pooled("pool_dead"), stack: "pool", fill: true, backgroundColor: "rgba(248,113,113,.18)", borderColor: "#f87171", borderWidth: 1.5, pointRadius: 0, tension: 0 },
-        { label: "untested", data: pooled("pool_untested"), stack: "pool", fill: true, backgroundColor: "rgba(148,163,184,.18)", borderColor: "#94a3b8", borderWidth: 1.5, pointRadius: 0, tension: 0 },
-        { label: "alive", data: pooled("pool_alive"), stack: "pool", fill: true, backgroundColor: "rgba(52,211,153,.18)", borderColor: "#34d399", borderWidth: 1.5, pointRadius: 0, tension: 0 },
-        { label: "in_use", data: pooled("pool_in_use"), stack: "overlay", fill: false, borderColor: "#fbbf24", borderWidth: 1.5, pointRadius: 0, tension: 0 },
-        { label: "tier_a", data: pooled("pool_tier_a"), fill: false, borderColor: "#38bdf8", borderWidth: 1.5, borderDash: [2, 2], pointRadius: 0, tension: 0 },
-        { label: "avg_score", data: pooled("pool_avg_score"), yAxisID: "y1", fill: false, borderColor: "#a78bfa", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+        { label: "dead", data: pooled("pool_dead"), stack: "pool", fill: true, backgroundColor: "rgba(255,107,94,.18)", borderColor: "#ff6b5e", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+        { label: "untested", data: pooled("pool_untested"), stack: "pool", fill: true, backgroundColor: "rgba(138,153,160,.18)", borderColor: "#8a99a0", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+        { label: "alive", data: pooled("pool_alive"), stack: "pool", fill: true, backgroundColor: "rgba(99,230,160,.18)", borderColor: "#63e6a0", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+        { label: "in_use", data: pooled("pool_in_use"), stack: "overlay", fill: false, borderColor: "#f2a93b", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+        { label: "tier_a", data: pooled("pool_tier_a"), fill: false, borderColor: "#4fd8ff", borderWidth: 1.5, borderDash: [2, 2], pointRadius: 0, tension: 0 },
+        { label: "avg_score", data: pooled("pool_avg_score"), yAxisID: "y1", fill: false, borderColor: "#9fb8d8", borderWidth: 1.5, pointRadius: 0, tension: 0 },
       ]},
       options: {
         parsing: false,
@@ -223,8 +223,8 @@ function redrawCharts() {
     state.panels.tunnel = new Chart($("#tunnel-chart"), {
       type: "line",
       data: { datasets: [
-        { label: "active", data: pooled("tunnel_active"), fill: true, backgroundColor: "rgba(56,189,248,.15)", borderColor: "#38bdf8", borderWidth: 1.5, pointRadius: 0, stepped: true, tension: 0 },
-        { label: "degraded", data: pooled("tunnel_degraded"), fill: false, borderColor: "#f87171", borderWidth: 1, borderDash: [4, 4], pointRadius: 0, stepped: true, tension: 0 },
+        { label: "active", data: pooled("tunnel_active"), fill: true, backgroundColor: "rgba(79,216,255,.15)", borderColor: "#4fd8ff", borderWidth: 1.5, pointRadius: 0, stepped: true, tension: 0 },
+        { label: "degraded", data: pooled("tunnel_degraded"), fill: false, borderColor: "#ff6b5e", borderWidth: 1, borderDash: [4, 4], pointRadius: 0, stepped: true, tension: 0 },
       ]},
       options: {
         parsing: false,
@@ -258,9 +258,9 @@ function drawProtocolChart(rows) {
       data: {
         labels,
         datasets: [
-          { label: "alive", data: sorted.map((r) => r.alive), backgroundColor: "#34d399" },
-          { label: "untested", data: sorted.map((r) => r.untested), backgroundColor: "#94a3b8" },
-          { label: "dead", data: sorted.map((r) => r.dead), backgroundColor: "#f87171" },
+          { label: "alive", data: sorted.map((r) => r.alive), backgroundColor: "#63e6a0" },
+          { label: "untested", data: sorted.map((r) => r.untested), backgroundColor: "#8a99a0" },
+          { label: "dead", data: sorted.map((r) => r.dead), backgroundColor: "#ff6b5e" },
         ],
       },
       options: {
@@ -303,8 +303,8 @@ function drawPoolDonut(pool) {
         labels: ["alive", "untested", "dead"],
         datasets: [{
           data,
-          backgroundColor: ["#34d399", "#94a3b8", "#f87171"],
-          borderColor: "#10161d",
+          backgroundColor: ["#63e6a0", "#8a99a0", "#ff6b5e"],
+          borderColor: "#0e1417",
           borderWidth: 2,
           borderRadius: 4,
           spacing: 2,
