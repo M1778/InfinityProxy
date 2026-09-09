@@ -104,6 +104,28 @@ class FakeEngine:
         self.calls.append(("refresh", source_name))
         return {"name": source_name, "last_fetch_s": 3, "next_fetch_s": 897}
 
+    def host(self) -> dict[str, Any]:
+        self.calls.append(("host",))
+        return {
+            "hostagent": {"available": True, "uptime_s": 12},
+            "proxy": {"enabled": False, "endpoint": None, "mode": "none"},
+            "tun": {"enabled": False, "running": False},
+        }
+
+    def host_pick(self, tunnel: str = "auto") -> dict[str, Any]:
+        self.calls.append(("host_pick", tunnel))
+        return {"tunnel": "tu_1", "cached": False, "stale_in_s": 60, "measurements": []}
+
+    def host_set_proxy(
+        self, enabled: bool, tunnel: str | None = None
+    ) -> dict[str, Any]:
+        self.calls.append(("host_set_proxy", enabled, tunnel))
+        return {"proxy": {"enabled": enabled, "tunnel": "tu_1" if enabled else None}}
+
+    def host_set_tun(self, enabled: bool, tunnel: str | None = None) -> dict[str, Any]:
+        self.calls.append(("host_set_tun", enabled, tunnel))
+        return {"tun": {"enabled": enabled, "tunnel": "tu_1" if enabled else None}}
+
 
 class RaisingEngine(FakeEngine):
     def renew_tunnel(self, tunnel_id: str) -> dict[str, Any]:
@@ -465,3 +487,86 @@ def test_history_flattens_unknown_metric_key():
     assert cols["mystery_metric"] == [9.0]
     assert cols["pool_alive"] == [1.0]
     assert cols["t"] == [1.0]
+
+
+# ---------- /api/host proxy routes ----------
+
+
+def test_host_routes_proxy_to_engine(panel):
+    test, fake = panel
+    assert test.get("/api/host").status_code == 200
+    assert fake.calls[-1] == ("host",)
+
+    res = test.post("/api/host/pick", json={"tunnel": "auto"})
+    assert res.status_code == 200
+    assert res.get_json()["tunnel"] == "tu_1"
+    assert fake.calls[-1] == ("host_pick", "auto")
+
+    res = test.post("/api/host/proxy", json={"enabled": True, "tunnel": "tu_1"})
+    assert res.status_code == 200
+    assert res.get_json()["proxy"]["enabled"] is True
+    assert fake.calls[-1] == ("host_set_proxy", True, "tu_1")
+
+    res = test.post("/api/host/tun", json={"enabled": False})
+    assert res.status_code == 200
+    assert res.get_json()["tun"]["enabled"] is False
+    assert fake.calls[-1] == ("host_set_tun", False, None)
+
+
+def test_host_routes_pass_engine_errors(panel):
+    test, fake = panel
+
+    def raise_engine(*_a, **_k):
+        raise EngineError(502, "hostagent_unreachable", "down")
+
+    fake.host_set_proxy = raise_engine  # type: ignore[method-assign]
+    res = test.post("/api/host/proxy", json={"enabled": True, "tunnel": "tu_1"})
+    assert res.status_code == 502
+    assert res.get_json()["error"]["code"] == "hostagent_unreachable"
+
+
+# ---------- /docs page ----------
+
+
+@pytest.fixture()
+def docs_panel(tmp_path, monkeypatch):
+    (tmp_path / "architecture.md").write_text(
+        "# Architecture\n\nSome **markdown** body with a `code` span.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("panel.docs.repo_docs_dir", lambda: tmp_path)
+    fake = FakeEngine()
+    app = create_app(
+        settings=PanelSettings(), engine=fake, poll=False, docs_dir=str(tmp_path)
+    )
+    app.config["TESTING"] = True
+    return app.test_client(), fake
+
+
+def test_docs_redirects_to_architecture(docs_panel):
+    test, _ = docs_panel
+    res = test.get("/docs")
+    assert res.status_code == 302
+    assert res.headers["Location"] == "/docs/architecture"
+
+
+def test_docs_page_renders_markdown(docs_panel):
+    test, _ = docs_panel
+    res = test.get("/docs/architecture")
+    assert res.status_code == 200
+    body = res.get_data(as_text=True)
+    assert "Architecture" in body
+    assert "<strong>markdown</strong>" in body
+    assert "<code>code</code>" in body
+    assert 'class="doc-nav"' in body
+
+
+def test_docs_supports_md_and_html_suffix(docs_panel):
+    test, _ = docs_panel
+    assert test.get("/docs/architecture.html").status_code == 200
+    assert test.get("/docs/architecture.md").status_code == 200
+
+
+def test_docs_unknown_page_404(docs_panel):
+    test, _ = docs_panel
+    assert test.get("/docs/doesnotexist").status_code == 404

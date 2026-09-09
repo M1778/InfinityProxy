@@ -47,6 +47,13 @@ class Settings:
     db_path: str = "infinity.db"
     singbox_image: str = "ghcr.io/sagernet/sing-box:v1.11.6"
     engine_name_prefix: str = "infinity"
+    host_enabled: bool = False
+    hostagent_url: str = "http://127.0.0.1:8788"
+    hostagent_port: int = 8788
+    host_pick_ttl_s: int = 60
+    host_pick_test_url: str = "https://api.ipify.org"
+    host_pick_sample_bytes: int = 262144
+    host_pick_timeout_s: float = 8.0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -116,6 +123,21 @@ class Settings:
             ),
             engine_name_prefix=os.environ.get(
                 "INFINITY_ENGINE_NAME_PREFIX", "infinity"
+            ),
+            hostagent_port=_env_int("INFINITY_HOSTAGENT_PORT", 8788),
+            host_enabled=os.environ.get("INFINITY_HOST_ENABLED", "0").lower()
+            not in ("0", "false", "no"),
+            hostagent_url=os.environ.get(
+                "INFINITY_HOSTAGENT_URL",
+                f"http://127.0.0.1:{_env_int('INFINITY_HOSTAGENT_PORT', 8788)}",
+            ),
+            host_pick_ttl_s=_env_int("INFINITY_HOST_PICK_TTL_S", 60),
+            host_pick_test_url=os.environ.get(
+                "INFINITY_HOST_PICK_TEST_URL", "https://api.ipify.org"
+            ),
+            host_pick_sample_bytes=_env_int("INFINITY_HOST_PICK_SAMPLE_BYTES", 262144),
+            host_pick_timeout_s=float(
+                os.environ.get("INFINITY_HOST_PICK_TIMEOUT_S", "8.0")
             ),
         )
 

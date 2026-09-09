@@ -47,7 +47,19 @@
       </svg>
       <span class="tablabel">Sources</span>
     </a>
+    <a href="#host" data-view="host">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M8 20h8M12 16v4"/>
+      </svg>
+      <span class="tablabel">Host</span>
+    </a>
   </nav>
+  <a class="docs-link" href="/docs" rel="noreferrer">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M5 4h7a3 3 0 0 1 3 3v13a2 2 0 0 0-2-2H5z"/><path d="M15 7h3a2 2 0 0 1 2 2v11a2 2 0 0 0-2-2h-3"/>
+    </svg>
+    <span class="tablabel">Docs</span>
+  </a>
   <div id="conn-pill" class="pill" data-state="offline"><span class="dot"></span><span class="plabel">connecting</span></div>
 </header>
 
@@ -119,6 +131,48 @@
       <table class="data-table" id="source-table">
         <thead><tr>
           <th>name</th><th>last fetch</th><th>next fetch</th><th>actions</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="view-host" class="view" data-name="host" hidden>
+    <div id="host-agent" class="host-agent">
+      <p class="muted">Checking hostagent…</p>
+    </div>
+    <div class="host-cards">
+      <div class="host-card">
+        <div class="host-card-head">
+          <h2><svg class="hicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 15l5-5 4 4 5-6"/><path d="M19 8h-5"/></svg>System proxy</h2>
+          <button id="proxy-toggle" class="switch" role="switch" aria-checked="false"><span></span></button>
+        </div>
+        <p class="muted" id="proxy-state">off</p>
+        <p class="muted" id="proxy-cap"></p>
+      </div>
+      <div class="host-card">
+        <div class="host-card-head">
+          <h2><svg class="hicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3 12h18M12 3.5a14 14 0 0 1 0 17M12 3.5a14 14 0 0 0 0 17"/></svg>TUN mode</h2>
+          <button id="tun-toggle" class="switch" role="switch" aria-checked="false"><span></span></button>
+        </div>
+        <p class="muted" id="tun-state">off</p>
+      </div>
+    </div>
+    <div class="host-selector">
+      <label>Target
+        <select id="host-target" class="select">
+          <option value="auto">Auto (best)</option>
+        </select>
+      </label>
+      <button id="host-measure" class="btn primary" type="button">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 8a7 7 0 1 1 2 4.9M1 14v-4h4"/></svg>
+        Re-measure
+      </button>
+    </div>
+    <div class="table-wrap">
+      <table class="data-table" id="host-table">
+        <thead><tr>
+          <th>tunnel</th><th>endpoint</th><th>latency</th><th>throughput</th>
         </tr></thead>
         <tbody></tbody>
       </table>

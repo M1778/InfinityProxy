@@ -15,6 +15,8 @@ services:
       INFINITY_DB: /data/infinity.db
       INFINITY_SINGBOX_IMAGE: ${INFINITY_SINGBOX_IMAGE:-ghcr.io/sagernet/sing-box:v1.11.6}
       INFINITY_PANEL_BASE_URL: ${INFINITY_PANEL_BASE_URL:-http://127.0.0.1:8000}
+      INFINITY_HOST_ENABLED: ${INFINITY_HOST_ENABLED:-0}
+      INFINITY_HOSTAGENT_URL: ${INFINITY_HOSTAGENT_URL:-http://127.0.0.1:8788}
     volumes:
       - infinity-data:/data
       - /var/run/docker.sock:/var/run/docker.sock
@@ -32,6 +34,26 @@ services:
       INFINITY_PANEL_TEST_URL: ${INFINITY_PANEL_TEST_URL:-https://api.ipify.org}
     depends_on:
       - engine
+    restart: unless-stopped
+
+  hostagent:
+    build: .
+    image: infinityproxy-engine
+    network_mode: host
+    privileged: true
+    profiles: ["host"]
+    command: ["python", "-m", "hostagent"]
+    environment:
+      INFINITY_HOSTAGENT_HOST: 127.0.0.1
+      INFINITY_HOSTAGENT_PORT: ${INFINITY_HOSTAGENT_PORT:-8788}
+      INFINITY_HOST_UID: ${INFINITY_HOST_UID:-1000}
+      INFINITY_HOST_BUS: ${INFINITY_HOST_BUS:-/run/user/${INFINITY_HOST_UID:-1000}/bus}
+      INFINITY_SINGBOX_IMAGE: ${INFINITY_SINGBOX_IMAGE:-ghcr.io/sagernet/sing-box:v1.11.6}
+      INFINITY_ENGINE_NAME_PREFIX: ${INFINITY_ENGINE_NAME_PREFIX:-infinity}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /run/user/${INFINITY_HOST_UID:-1000}/bus:/run/user/${INFINITY_HOST_UID:-1000}/bus
+      - /dev/net/tun:/dev/net/tun
     restart: unless-stopped
 
 volumes:

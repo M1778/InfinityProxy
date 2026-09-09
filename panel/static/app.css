@@ -369,6 +369,76 @@ footer::before {
   color: var(--muted);
 }
 
+/* ---------- docs page (/docs) ---------- */
+.docs-link {
+  display: inline-flex; align-items: center; gap: .4rem;
+  color: var(--muted); font-size: .78rem; margin-right: 1rem;
+}
+.docs-link svg { width: 15px; height: 15px; }
+.docs-link:hover { color: var(--ok); }
+
+.doc-layout { display: flex; gap: 1.6rem; padding: 1.4rem 1.6rem 3rem; max-width: 1200px; margin: 0 auto; align-items: flex-start; }
+.doc-nav {
+  position: sticky; top: 1.4rem; flex: 0 0 15rem;
+  display: flex; flex-direction: column; gap: .2rem;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 5px;
+  padding: .8rem .6rem; font-size: .78rem;
+}
+.doc-group {
+  font: 600 .64rem/1 var(--display); text-transform: uppercase; letter-spacing: .14em;
+  color: var(--faint); padding: .5rem .5rem .25rem;
+}
+.doc-nav a { padding: .3rem .5rem; border-radius: 3px; color: var(--muted); }
+.doc-nav a:hover { color: var(--text); background: var(--surface2); }
+.doc-nav a.active { color: var(--ok); background: var(--ok-dim); }
+
+.doc-content { flex: 1; min-width: 0; font-size: .88rem; line-height: 1.65; }
+.doc-content h1 {
+  font: 600 1.5rem/1.15 var(--display); letter-spacing: .02em;
+  margin-bottom: 1rem; border-bottom: 1px solid var(--border); padding-bottom: .5rem;
+}
+.doc-content h2 { margin-top: 2rem; font-size: .95rem; text-transform: uppercase; letter-spacing: .14em; color: var(--muted); }
+.doc-content h3 { margin-top: 1.5rem; font-size: .9rem; color: var(--muted); }
+.doc-content code { font-size: .8rem; background: var(--surface2); border: 1px solid var(--border); border-radius: 3px; padding: .05rem .3rem; }
+.doc-content pre {
+  background: var(--bg-raise); border: 1px solid var(--border); border-radius: 5px;
+  padding: .8rem 1rem; overflow-x: auto; font-size: .78rem; line-height: 1.6;
+}
+.doc-content pre code { background: none; border: 0; padding: 0; }
+.doc-content table { border-collapse: collapse; width: 100%; font-size: .8rem; margin: 1rem 0; }
+.doc-content th, .doc-content td { text-align: left; padding: .45rem .7rem; border-bottom: 1px solid var(--border); }
+.doc-content th { font: 600 .7rem/1 var(--display); text-transform: uppercase; letter-spacing: .12em; color: var(--muted); }
+.doc-content blockquote { margin: 1rem 0; padding: .5rem 1rem; border-left: 3px solid var(--warn); background: var(--warn-dim); border-radius: 0 4px 4px 0; }
+
+/* ---------- host view ---------- */
+.host-agent { margin-bottom: 1rem; }
+.host-ok { color: var(--ok); }
+.host-warn { color: var(--warn); }
+.host-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+.host-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 1rem 1.1rem; }
+.host-card-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.host-card-head h2 { margin: 0; }
+.host-card p { margin: .5rem 0 0; font-size: .8rem; }
+.switch {
+  position: relative; width: 42px; height: 22px; flex: none;
+  border: 1px solid var(--border-hi); border-radius: 999px; background: var(--bg-raise);
+  cursor: pointer; padding: 0;
+}
+.switch span {
+  position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--faint); transition: left .15s ease, background .15s ease;
+}
+.switch[aria-checked="true"] { border-color: var(--ok); }
+.switch[aria-checked="true"] span { left: 22px; background: var(--ok); box-shadow: 0 0 6px rgba(99, 230, 160, .6); }
+.host-selector { display: flex; align-items: end; gap: .8rem; margin-bottom: 1rem; }
+.host-selector label { font: 600 .64rem/1 var(--display); text-transform: uppercase; letter-spacing: .14em; color: var(--muted); }
+.host-selector .select { min-width: 16rem; }
+
+@media (max-width: 760px) {
+  .doc-layout { flex-direction: column; }
+  .doc-nav { position: static; flex: none; width: 100%; }
+}
+
 @media (max-width: 760px) {
   .charts { grid-template-columns: 1fr; }
   .chart-card.wide { grid-column: auto; }

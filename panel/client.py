@@ -72,3 +72,21 @@ class EngineClient:
         return self._call(
             "POST", f"/sources/{source_name}/refresh", timeout=self.timeout * 12
         )
+
+    def host(self) -> dict[str, Any]:
+        return self._call("GET", "/host")
+
+    def host_pick(self) -> dict[str, Any]:
+        return self._call("POST", "/host/pick")
+
+    def host_set_proxy(
+        self, enabled: bool, tunnel: str | None = None
+    ) -> dict[str, Any]:
+        return self._call(
+            "POST", "/host/proxy", json={"enabled": enabled, "tunnel": tunnel}
+        )
+
+    def host_set_tun(self, enabled: bool, tunnel: str | None = None) -> dict[str, Any]:
+        return self._call(
+            "POST", "/host/tun", json={"enabled": enabled, "tunnel": tunnel}
+        )

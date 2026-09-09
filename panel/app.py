@@ -6,8 +6,9 @@ import time
 from typing import Any, Callable
 
 import requests
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, redirect, request
 
+from panel import docs as _docs
 from panel.client import EngineClient, EngineError
 from panel.config import PanelSettings
 from panel.history import SnapshotHistory
@@ -58,11 +59,13 @@ def create_app(
     engine: EngineClient | None = None,
     dial: Callable[[dict[str, Any], str], dict[str, Any]] | None = None,
     poll: bool = True,
+    docs_dir: str | None = None,
 ) -> Flask:
     app = Flask(__name__, static_folder="static", static_url_path="")
     client = engine or EngineClient(settings.engine_url)
     dial_fn = dial or _default_dial
     history = SnapshotHistory(window_s=settings.history_seconds)
+    doc_source: str | None = docs_dir
     state: dict[str, Any] = {
         "t": 0.0,
         "status": {},
@@ -139,6 +142,21 @@ def create_app(
     @app.get("/")
     def index():
         return app.send_static_file("index.html")
+
+    @app.get("/docs")
+    def docs_index():
+        return redirect("/docs/architecture", code=302)
+
+    @app.get("/docs/<name>")
+    def docs_page(name: str):
+        entry = _docs.find_doc(name, doc_source)
+        if entry is None:
+            return f"no such doc: {name}", 404
+        title, body = _docs.render_doc(entry)
+        return Response(
+            _docs.page_html(title, body, entry["name"], doc_source),
+            mimetype="text/html",
+        )
 
     @app.get("/api/snapshot")
     def api_snapshot():
@@ -253,6 +271,26 @@ def create_app(
                 }
             ), 502
         return jsonify({"ok": True, **result})
+
+    @app.get("/api/host")
+    def api_host():
+        return proxy(client.host)
+
+    @app.post("/api/host/pick")
+    def api_host_pick():
+        return proxy(client.host_pick)
+
+    @app.post("/api/host/proxy")
+    def api_host_proxy():
+        body = request.get_json(silent=True) or {}
+        enabled = bool(body.get("enabled"))
+        return proxy(lambda: client.host_set_proxy(enabled, body.get("tunnel") or None))
+
+    @app.post("/api/host/tun")
+    def api_host_tun():
+        body = request.get_json(silent=True) or {}
+        enabled = bool(body.get("enabled"))
+        return proxy(lambda: client.host_set_tun(enabled, body.get("tunnel") or None))
 
     app.crawl_once = crawl_once  # type: ignore[attr-defined]
     app.panel_client = client  # type: ignore[attr-defined]

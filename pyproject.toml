@@ -13,6 +13,7 @@ dependencies = [
     "cryptography>=42.0",
     "docker>=7.0",
     "flask>=3.0",
+    "markdown>=3.5",
     "requests>=2.31",
 ]
 
@@ -23,7 +24,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["engine*", "panel*"]
+include = ["engine*", "panel*", "hostagent*"]
 
 [tool.ruff]
 line-length = 88

@@ -11,6 +11,7 @@ from flask import Flask, jsonify, redirect, request
 from engine.assigner import Assigner, PortExhausted
 from engine.config import Settings
 from engine.db import Store
+from engine.host import HostAgentError, HostController
 from engine.models import Node, Tunnel
 from engine.scheduler import ASSIGNABLE_PROTOCOLS, Engine
 from engine.stability import (
@@ -34,12 +35,14 @@ def create_app(
     controller: ContainerController | None = None,
     assigner: Assigner | None = None,
     background: bool = True,
+    host: HostController | None = None,
 ) -> Flask:
     settings = settings or Settings.from_env()
     store = store or Store(settings.db_path)
     store.create_schema()
     controller = controller or ContainerController(settings)
     assigner = assigner or Assigner(settings)
+    host = host or HostController(settings)
     engine = Engine(settings, store, assigner, controller)
 
     app = Flask("infinityproxy")
@@ -47,6 +50,43 @@ def create_app(
 
     def err(code: str, message: str, status: int):
         return jsonify({"error": {"code": code, "message": message}}), status
+
+    def _host_target(target: Any, tunnels: list[Tunnel]) -> Tunnel | None:
+        """Resolve the requested host target. 'auto'/None picks best by measurement."""
+        if target in (None, "", "auto"):
+            try:
+                pick = host.pick_best(tunnels, force=True)
+            except HostAgentError as exc:
+                if exc.code == "host_target_unavailable":
+                    return None
+                raise
+            return store.get_tunnel(pick["tunnel"])
+        return store.get_tunnel(str(target))
+
+    def _host_apply(mode: str):
+        body = request.get_json(silent=True) or {}
+        enabled = bool(body.get("enabled"))
+        tunnels = [t for t in store.load_tunnels() if t.state != "stopped" and t.port]
+        tunnel = None
+        if enabled:
+            try:
+                tunnel = _host_target(body.get("tunnel"), tunnels)
+            except HostAgentError as exc:
+                return err(exc.code, exc.message, exc.status)
+            if tunnel is None:
+                return err(
+                    "host_target_unavailable",
+                    "no usable tunnel for the host target",
+                    409,
+                )
+        try:
+            if mode == "proxy":
+                result = host.set_proxy(enabled, tunnel)
+            else:
+                result = host.set_tun(enabled, tunnel)
+        except HostAgentError as exc:
+            return err(exc.code, exc.message, exc.status)
+        return jsonify(result)
 
     @app.get("/status")
     def status():
@@ -247,6 +287,53 @@ def create_app(
         engine._rendered.pop(tunnel_id, None)
         engine._last_check.pop(tunnel_id, None)
         return ("", 204)
+
+    @app.get("/host")
+    def host_status():
+        if not settings.host_enabled:
+            return err(
+                "host_features_disabled",
+                "host features are disabled (INFINITY_HOST_ENABLED=0)",
+                409,
+            )
+        return jsonify(host.status(store.load_tunnels()))
+
+    @app.post("/host/pick")
+    def host_pick():
+        if not settings.host_enabled:
+            return err(
+                "host_features_disabled",
+                "host features are disabled (INFINITY_HOST_ENABLED=0)",
+                409,
+            )
+        tunnels = [t for t in store.load_tunnels() if t.state != "stopped" and t.port]
+        if not tunnels:
+            return err("host_target_unavailable", "no running tunnels to measure", 409)
+        try:
+            result = host.pick_best(tunnels, force=True)
+        except HostAgentError as exc:
+            return err(exc.code, exc.message, exc.status)
+        return jsonify(result)
+
+    @app.post("/host/proxy")
+    def host_proxy():
+        if not settings.host_enabled:
+            return err(
+                "host_features_disabled",
+                "host features are disabled (INFINITY_HOST_ENABLED=0)",
+                409,
+            )
+        return _host_apply("proxy")
+
+    @app.post("/host/tun")
+    def host_tun():
+        if not settings.host_enabled:
+            return err(
+                "host_features_disabled",
+                "host features are disabled (INFINITY_HOST_ENABLED=0)",
+                409,
+            )
+        return _host_apply("tun")
 
     @app.get("/")
     def dashboard():

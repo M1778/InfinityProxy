@@ -12,6 +12,8 @@ const state = {
   snap: null,           // latest /api/snapshot payload
   history: null,        // /api/history columns
   nodes: null,          // last /api/nodes result
+  host: null,           // last /api/host result
+  hostError: null,
   lastSnapAt: 0,
   panels: { pool: null, tunnel: null, proto: null, donut: null },
 };
@@ -73,7 +75,9 @@ async function api(path, opts = {}) {
   if (!res.ok) {
     const msg = payload && payload.error ? payload.error.message : `HTTP ${res.status}`;
     if (!opts.silent) toast("error", msg);
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.code = payload && payload.error ? payload.error.code : "http_error";
+    throw err;
   }
   return payload;
 }
@@ -102,6 +106,7 @@ function route() {
   $$(".tabs a").forEach((a) => a.classList.toggle("active", a.dataset.view === name));
   if (name === "nodes" && !state.nodes) loadNodes();
   if (name === "tunnels") renderTunnels();
+  if (name === "host") refreshHost();
 }
 window.addEventListener("hashchange", route);
 
@@ -495,6 +500,135 @@ async function refreshSource(name, btn) {
   } finally { btn.disabled = false; }
 }
 
+/* ---------- host view ---------- */
+
+async function refreshHost() {
+  try {
+    state.host = await api("/api/host", { silent: true });
+    state.hostError = null;
+  } catch (err) {
+    state.host = null;
+    state.hostError = { code: err.code, message: err.message };
+  }
+  renderHost();
+}
+
+function renderHost() {
+  const box = $("#host-agent");
+  if (state.hostError) {
+    box.innerHTML = `<p class="host-warn">Host view unavailable — <code>${esc(state.hostError.code)}</code>: ${esc(state.hostError.message)}</p>`;
+    proxyToggle(false);
+    tunToggle(false);
+    renderHostTargets([]);
+    renderHostTable([]);
+    return;
+  }
+  const host = state.host;
+  if (!host) {
+    box.innerHTML = '<p class="muted">Checking hostagent…</p>';
+    return;
+  }
+  const agent = host.hostagent || {};
+  if (agent.available) {
+    const plat = host.platform ? `${host.platform.system} ${host.platform.machine}` : "";
+    const caps = host.capabilities || {};
+    box.innerHTML =
+      `<p class="host-ok">hostagent online — ${esc(plat)} · proxy ${esc(caps.proxy || "none")}` +
+      ` · ${caps.tun ? "tun available" : "no tun"} · up ${fmtAge(agent.uptime_s)}</p>`;
+  } else {
+    box.innerHTML = `<p class="host-warn">hostagent unreachable — ${esc(agent.error || "")}</p>`;
+  }
+  const proxy = host.proxy || { enabled: false };
+  const tun = host.tun || { enabled: false };
+  proxyToggle(proxy.enabled, proxy.endpoint, proxy.tunnel);
+  tunToggle(tun.enabled, tun.endpoint, tun.tunnel);
+  $("#proxy-cap").textContent = host.capabilities
+    ? `capability: ${esc(host.capabilities.proxy)}`
+    : "";
+  const pick = host.pick || null;
+  renderHostTargets(host.tunnels || [], pick ? pick.tunnel : null);
+  renderHostTable(pick ? pick.measurements : host.tunnels || []);
+}
+
+function proxyToggle(on, endpoint, tunnel) {
+  $("#proxy-toggle").setAttribute("aria-checked", String(on));
+  $("#proxy-state").innerHTML = on
+    ? `on → <code>${esc(endpoint || "")}</code>` +
+      (tunnel ? ` <span class="muted">(${esc(tunnel)})</span>` : "")
+    : "off";
+}
+
+function tunToggle(on, endpoint) {
+  $("#tun-toggle").setAttribute("aria-checked", String(on));
+  $("#tun-state").innerHTML = on
+    ? `on — route all traffic via tunnel` + (endpoint ? ` <code>${esc(endpoint)}</code>` : "")
+    : "off";
+}
+
+function renderHostTargets(tunnels, pickId) {
+  const sel = $("#host-target");
+  const current = sel.value;
+  sel.innerHTML =
+    `<option value="auto">Auto (best)</option>` +
+    tunnels
+      .map((t) => {
+        const lat = t.latency_ms != null ? `${t.latency_ms} ms` : "no data";
+        return `<option value="${esc(t.tunnel)}">${esc(t.tunnel.slice(0, 12))}… :${t.port} ${lat}</option>`;
+      })
+      .join("");
+  const kept = [...sel.options].some((o) => o.value === current)
+    ? current
+    : pickId || "auto";
+  sel.value = kept;
+}
+
+function renderHostTable(rows) {
+  const body = $("#host-table tbody");
+  if (!rows.length) {
+    body.innerHTML =
+      '<tr><td colspan="4" class="muted">No tunnel candidates yet — create one, then re-measure.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows
+    .map(
+      (m) => `<tr>
+        <td class="mono">${esc(m.tunnel || m.id)}</td>
+        <td class="mono">127.0.0.1:${m.port}</td>
+        <td class="mono">${m.latency_ms != null ? m.latency_ms + " ms" : "—"}</td>
+        <td class="mono">${m.throughput_kb_s != null ? Math.round(m.throughput_kb_s) + " KiB/s" : "—"}</td>
+      </tr>`
+    )
+    .join("");
+}
+
+async function hostApply(mode) {
+  const toggle = mode === "proxy" ? $("#proxy-toggle") : $("#tun-toggle");
+  const enabling = toggle.getAttribute("aria-checked") !== "true";
+  const target = $("#host-target").value;
+  try {
+    await api(`/api/host/${mode}`, {
+      method: "POST",
+      body: { enabled: enabling, tunnel: target },
+    });
+    toast("ok", `${mode} ${enabling ? "enabled" : "disabled"}.`);
+  } catch (_) { /* toast shown */ }
+  await refreshHost();
+}
+
+async function hostMeasure() {
+  const btn = $("#host-measure");
+  btn.disabled = true;
+  try {
+    const pick = await api("/api/host/pick", { method: "POST" });
+    const best = (pick.measurements || []).find((m) => m.tunnel === pick.tunnel);
+    state.host = state.host || {};
+    state.host.pick = pick;
+    toast("ok", `Best target: ${pick.tunnel} — ${best ? best.latency_ms : "?"} ms`);
+  } catch (_) { /* toast shown */ }
+  finally { btn.disabled = false; }
+  await refreshHost();
+}
+
 /* ---------- footer ---------- */
 
 function renderFooter() {
@@ -535,6 +669,15 @@ async function init() {
   $("#node-filter").addEventListener("submit", (e) => { e.preventDefault(); loadNodes(); });
   $("#modal-close").addEventListener("click", hideModal);
   $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") hideModal(); });
+
+  $("#proxy-toggle").addEventListener("click", () => hostApply("proxy"));
+  $("#tun-toggle").addEventListener("click", () => hostApply("tun"));
+  $("#host-measure").addEventListener("click", hostMeasure);
+  $("#host-target").addEventListener("change", () => {
+    if (!state.host) return;
+    if ((state.host.proxy && state.host.proxy.enabled) ||
+        (state.host.tun && state.host.tun.enabled)) refreshHost();
+  });
 
   connectSSE();
   route();

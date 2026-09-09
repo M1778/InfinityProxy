@@ -133,7 +133,7 @@ class ContainerController:
         except _docker_api_error() as exc:
             raise TunnelRuntimeUnavailable(str(exc)) from exc
         try:
-            container.put_archive("/etc/", _config_tar(config))
+            container.put_archive("/etc/", config_tar(config))
             container.start()
         except _docker_api_error() as exc:
             # The container may have been created but never got a usable
@@ -167,7 +167,7 @@ class ContainerController:
             container.remove(force=True)
 
 
-def _config_tar(config: dict) -> bytes:
+def config_tar(config: dict) -> bytes:
     # The official sing-box image has no /etc/sing-box, and put_archive cannot
     # create its target directory, so the archive carries a nested member and
     # is extracted into /etc to create the path on the fly.
