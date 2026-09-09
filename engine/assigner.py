@@ -139,12 +139,16 @@ class Assigner:
         return added
 
     def release_tunnel(self, store: Store, tunnel_id: str) -> int:
-        """Free every node assigned to the tunnel; returns the number freed."""
+        """Free every node assigned to the tunnel; returns the number freed.
+
+        The release is a pure node-table update and must run even when the tunnel
+        row is already gone, or its assignments leak and starve the pool forever.
+        """
+        freed = store.release_tunnel(tunnel_id)
         tunnel = store.get_tunnel(tunnel_id)
-        if tunnel is None:
-            return 0
-        freed = tunnel.node_count_granted
-        store.release_tunnel(tunnel_id)
+        if tunnel is not None and tunnel.node_count_granted:
+            tunnel.node_count_granted = 0
+            store.save_tunnel(tunnel)
         return freed
 
     def create_tunnel_config(

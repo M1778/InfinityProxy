@@ -144,8 +144,11 @@ A single SQLite file (default `infinity.db`) on a Docker volume persists:
 
 Raw scrape batches are ephemeral. On boot the Engine loads this state and
 **reconciles**: it adopts containers whose config still matches, and stops
-orphans it no longer has a row for. Node liveness is re-established by the
-filter loop within one cadence.
+orphans it no longer has a row for. It also frees any node assignment that
+points at a tunnel with no row — a tunnel deleted outside the normal release
+path (crash between release and delete, legacy data) must not leave its nodes
+permanently "in use" and starve every degraded tunnel's top-up. Node liveness
+is re-established by the filter loop within one cadence.
 
 ## Request flow (end to end)
 

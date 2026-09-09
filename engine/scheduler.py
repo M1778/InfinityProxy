@@ -77,7 +77,13 @@ class Engine:
             thread.join(timeout=5)
 
     def reconcile(self) -> None:
-        """Boot reconciliation: adopt live tunnels, reap orphans, mark running."""
+        """Boot reconciliation: adopt live tunnels, reap orphans, mark running.
+
+        Also free node assignments that point at tunnels we have no row for. A
+        tunnel deleted outside the normal release path (crash between release
+        and delete, legacy data) would otherwise leave its nodes permanently
+        "in use", starving every degraded tunnel's top-up forever.
+        """
         expected = {
             t.tunnel_id for t in self.store.load_tunnels() if t.state != "stopped"
         }
@@ -85,6 +91,13 @@ class Engine:
             self.controller.reconcile(expected)
         except TunnelRuntimeUnavailable:
             logger.warning("docker unreachable; skipping container reconciliation")
+        live = {t.tunnel_id for t in self.store.load_tunnels()}
+        for orphan in self.store.assigned_tunnel_ids() - live:
+            freed = self.store.release_tunnel(orphan)
+            if freed:
+                logger.warning(
+                    "freed %d node assignment(s) for missing tunnel %s", freed, orphan
+                )
         for tunnel_id in expected:
             self.store.set_tunnel_state(tunnel_id, "running")
 

@@ -354,6 +354,17 @@ def test_release_tunnel_returns_released_count_and_frees_nodes(store: Store) -> 
     assert store.node_ids_assigned_to("tu_a") == {node_ids[1]}
 
 
+def test_release_tunnel_for_missing_row_still_frees_nodes(store: Store) -> None:
+    store.upsert_candidates([make_candidate(source="a")])
+    node = store.load_nodes()[0]
+
+    store.assign_nodes([node.node_id], "tu_ghost")
+    assert store.assigned_tunnel_ids() == {"tu_ghost"}
+    assert store.release_tunnel("tu_ghost") == 1
+    assert store.assigned_tunnel_ids() == set()
+    assert store.node_ids_in_use() == set()
+
+
 def test_pool_counts(store: Store) -> None:
     store.upsert_candidates(
         [

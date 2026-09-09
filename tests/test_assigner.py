@@ -94,10 +94,13 @@ class FakeStore:
                 )
             self._assignment[nid] = tunnel_id
 
-    def release_tunnel(self, tunnel_id: str) -> None:
+    def release_tunnel(self, tunnel_id: str) -> int:
+        freed = 0
         for nid in list(self._assignment):
             if self._assignment[nid] == tunnel_id:
                 del self._assignment[nid]
+                freed += 1
+        return freed
 
     def port_in_use(self, port: int) -> bool:
         return any(t.port == port for t in self._tunnels.values())
@@ -325,6 +328,19 @@ def test_release_tunnel_frees_nodes_for_future_assignment():
     assert store.node_ids_in_use() == []
     re_granted = assigner.assign_new(store, "t2", requested=3)
     assert len(re_granted) == 3
+
+
+def test_release_tunnel_missing_row_still_frees_nodes():
+    assigner = Assigner(tiny_settings())
+    store = FakeStore()
+    store.add_node(make_node("n1"))
+    store.add_node(make_node("n2"))
+    store.assign_nodes(["n1", "n2"], "ghost")  # no tunnel row was ever saved
+
+    freed = assigner.release_tunnel(store, "ghost")
+
+    assert freed == 2
+    assert store.node_ids_in_use() == []
 
 
 def test_create_tunnel_config_saves_tunnel_with_granted_count():

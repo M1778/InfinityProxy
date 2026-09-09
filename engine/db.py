@@ -468,25 +468,25 @@ class Store:
                 probed = "state = 'alive' AND COALESCE(probe_total, 0) >= ?"
                 # Freshness gate (ADR-0009 Phase 2): an evaluated node whose
                 # verdict aged past max_age_s leaves Tier A for Tier B.
+                # `now` is bound as a parameter: an interpolated float literal
+                # loses precision at epoch scale and skews the horizon.
                 fresh = ""
+                extra = []
                 if max_age_s is not None:
-                    now = time.time()
-                    fresh = (
-                        f" AND last_probe_s IS NOT NULL "
-                        f"AND {now:g} - last_probe_s <= {max_age_s:g}"
-                    )
+                    fresh = " AND last_probe_s IS NOT NULL AND ? - last_probe_s <= ?"
+                    extra = [time.time(), max_age_s]
                 tier_a = int(
                     self._conn.execute(
                         f"SELECT COUNT(*) FROM nodes WHERE {probed}"
                         f" AND {wilson} >= ?{fresh}",
-                        (min_probes, min_avail),
+                        [min_probes, min_avail] + extra,
                     ).fetchone()[0]
                 )
                 tier_b = int(
                     self._conn.execute(
                         f"SELECT COUNT(*) FROM nodes WHERE {probed}"
                         f" AND NOT ({wilson} >= ?{fresh})",
-                        (min_probes, min_avail),
+                        [min_probes, min_avail] + extra,
                     ).fetchone()[0]
                 )
                 row = self._conn.execute(
@@ -582,6 +582,13 @@ class Store:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT node_id FROM nodes WHERE assigned_to IS NOT NULL"
+            ).fetchall()
+        return {r[0] for r in rows}
+
+    def assigned_tunnel_ids(self) -> set[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT assigned_to FROM nodes WHERE assigned_to IS NOT NULL"
             ).fetchall()
         return {r[0] for r in rows}
 
