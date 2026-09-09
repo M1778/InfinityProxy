@@ -158,6 +158,16 @@ The pool is built from these public, auto-updated feeds (full details in
 - [**Roadmap**](./ROADMAP.md) — what's planned next
 - [**Contributing**](./CONTRIBUTING.md) — build, test, and CI conventions
 
+## Hosted demo
+
+A statically-built snapshot of the panel ([GitHub Actions → Pages](./.github/workflows/pages.yml))
+runs against in-memory fake data and a simulated SSE stream, so the whole UI —
+Overview, Tunnels, Nodes, Sources, **Host** and the **Docs** page — can be
+explored without a live engine. Sources: [pages.yml](./.github/workflows/pages.yml),
+[`demo/build_demo.py`](./demo/build_demo.py), [`demo/demo-bootstrap.js`](./demo/demo-bootstrap.js).
+The demo needs the repo's Pages setting **Source: GitHub Actions** (one-time,
+manual). Build locally with `python demo/build_demo.py` and open `_site/index.html`.
+
 ## License
 
 MIT. See [LICENSE](./LICENSE).

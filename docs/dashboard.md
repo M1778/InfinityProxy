@@ -64,6 +64,51 @@ nodes table carries **availability**, **score**, and **tier** columns. All of
 these come from fields the engine already reports on `GET /status` and
 `GET /nodes`; the panel adds no opinion about the numbers.
 
+## Host view (ADR-0010)
+
+A **Host** tab operates the Docker host's own traffic through a tunnel, driven
+by the privileged hostagent (see [ADR-0010](./adr/0010-hostagent.md) and
+[docs/api.md](./api.md#host-control-adr-0010)):
+
+- **System Proxy** toggle — sets the desktop session proxy to a tunnel
+  (`gsettings`/KDE capability-detected); the view shows whether the host has a
+  detectable desktop (`capabilities.proxy: "none"` renders the toggle disabled).
+- **TUN mode** toggle — routes the whole host's network through a tunnel; the
+  view shows `hostagent.capabilities.tun` and warns that a dead tunnel takes the
+  host's uplink down.
+- **Target selector** — every running tunnel listed with live **ping** (ms) and
+  **download speed** (KiB/s) measured through the tunnel proxy, plus an **Auto
+  pick best** option that asks the engine to measure all candidates and cache
+  the winner for `INFINITY_HOST_PICK_TTL_S`; a **Re-measure** button forces a
+  fresh pass (`POST /host/pick`). The current pick is shown with its cached
+  freshness (`stale_in_s`).
+- When the hostagent is unreachable the view renders the surface in a
+  `hostagent.available: false` state (features disabled, last-known state shown).
+
+The panel proxies `GET /host`, `POST /host/pick`, `POST /host/proxy`, and
+`POST /host/tun` from the engine; it computes nothing about the numbers.
+
+### Docs page (`/docs`)
+
+The panel also serves this repository's markdown spec as a navigable page:
+`GET /docs` redirects to `/docs/architecture`, and `GET /docs/<name>` renders
+`README` / `CONTEXT` / the `docs/*.md` reference / every ADR through
+`panel/docs.py` (markdown → HTML with fenced code, tables, sidebar nav grouped
+by getting-started / reference / decisions). Topbar "Docs" link opens it; the
+rendered pages reuse `app.css` and stay localhost-only like the panel itself.
+
+### Demo build (GitHub Pages)
+
+The frontend is zero-build, so the current design is also published as a static
+**demo** to GitHub Pages by `.github/workflows/pages.yml` on every push: the
+workflow copies `panel/static/` and the committed `demo/demo-bootstrap.js`
+fixtures (mock snapshot/history/nodes/host data + a simulated SSE tick) into the
+Pages artifact, so `https://<owner>.github.io/InfinityProxy/` always renders the
+latest UI with no backend. `demo/build_demo.py` additionally pre-renders every
+doc page to `_site/docs/<name>.html` (plus a `_site/docs/index.html` landing) so
+the **Docs** page works on static Pages too. See `demo/` and the workflow for
+the build steps.
+
 ## Engine API additions
 
 | Endpoint | Purpose |
@@ -72,6 +117,7 @@ these come from fields the engine already reports on `GET /status` and
 | `POST /sources/<name>/refresh` | trigger a source fetch now; `404` unknown source |
 | `GET /` | 302 → `INFINITY_PANEL_BASE_URL` (default `http://127.0.0.1:8000`) |
 | `GET /status` | `pool` gains `untested` and `by_protocol` (counts per protocol), computed with SQL GROUP BY — no node table shipped per poll |
+| `GET /host` / `POST /host/pick` / `POST /host/proxy` / `POST /host/tun` | host-wide System Proxy + TUN control via the hostagent (ADR-0010; `409 host_features_disabled` when `INFINITY_HOST_ENABLED` is `0`) |
 
 ## Steps (plan-orchestrate decomposition)
 

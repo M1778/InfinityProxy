@@ -3,7 +3,11 @@
 The Engine exposes a JSON REST control API on **`127.0.0.1:8787`** (configured
 via `INFINITY_PORT`). `GET /` redirects (302) to the web panel at
 `INFINITY_PANEL_BASE_URL` (default `http://127.0.0.1:8000`); the panel itself is
-documented in [dashboard.md](./dashboard.md).
+documented in [dashboard.md](./dashboard.md). Host-wide client features (System
+Proxy, TUN mode) are driven through the privileged **hostagent** at
+`INFINITY_HOSTAGENT_URL` (default `http://127.0.0.1:8788`) — see
+[Host control](#host-control-adr-0010) below and
+[ADR-0010](./adr/0010-hostagent.md).
 
 > **Security:** in v1 the control API and the panel are bound to localhost and
 > are **unauthenticated by design**. Don't publish them to any network. See
@@ -269,6 +273,101 @@ Responds **302** to the web panel at `INFINITY_PANEL_BASE_URL` (default
 `http://127.0.0.1:8000`). The engine itself serves no web UI anymore — the
 dashboard is the panel (see [dashboard.md](./dashboard.md)).
 
+### Host control (ADR-0010)
+
+Host-wide features are orchestrated by the engine against the privileged
+hostagent (see [ADR-0010](./adr/0010-hostagent.md)). The engine is the only
+caller of the hostagent; the panel proxies through the engine. All host endpoints
+are **gated**: when `INFINITY_HOST_ENABLED` is `0`, they answer `409
+(code: "host_features_disabled")`. When the hostagent is unreachable, `GET
+/host` reports `hostagent.available: false` (still 200, so the panel can render
+the feature as down) while the mutating endpoints answer **502**
+(`hostagent_unreachable`).
+
+**Auto Pick Best:** a target of `"auto"` makes the engine measure every running
+tunnel's egress — latency through the tunnel proxy (GET `INFINITY_HOST_PICK_TEST_URL`),
+then a download-throughput sample (`INFINITY_HOST_PICK_SAMPLE_BYTES`,
+`INFINITY_HOST_PICK_TIMEOUT_S`) — and pick the lowest latency, tie-broken by
+throughput. Results are cached `INFINITY_HOST_PICK_TTL_S` (default 60s);
+`POST /host/pick` forces a fresh pass.
+
+#### `GET /host` — host state + candidates
+
+Hostagent reachability, platform/capabilities, the current System Proxy and TUN
+state, the candidate tunnels with their last measurements, and the cached pick.
+
+| Field | Meaning |
+| --- | --- |
+| `hostagent.available` | Whether the hostagent answered (false → every other shape is `null`) |
+| `hostagent.capabilities.proxy` | Detected proxy setter: `"gsettings"` \| `"kwriteconfig"` \| `"none"` |
+| `hostagent.capabilities.tun` | Whether the host can run TUN mode (privilege + `/dev/net/tun`) |
+| `proxy` | Current System Proxy state (`{enabled, tunnel, endpoint}`) |
+| `tun` | Current TUN state (`{enabled, iface, tunnel, endpoint}`) |
+| `tunnels[]` | Running tunnels with `{id, host, port, username, latency_ms, throughput_kb_s}` (latency/throughput `null` until measured) |
+| `pick` | Last auto-pick result `{tunnel, latency_ms, throughput_kb_s, cached, stale_in_s}` |
+
+```json
+{
+  "hostagent": {
+    "available": true,
+    "platform": { "system": "linux", "machine": "x86_64", "docker": true, "tun": true },
+    "capabilities": { "proxy": "gsettings", "tun": true },
+    "uptime_s": 120
+  },
+  "proxy": { "enabled": true, "tunnel": "tu_8f3k9a", "endpoint": "127.0.0.1:10244" },
+  "tun": { "enabled": false, "iface": null, "tunnel": null, "endpoint": null },
+  "tunnels": [
+    { "id": "tu_8f3k9a", "host": "127.0.0.1", "port": 10244, "username": "u_5x2m", "latency_ms": 45, "throughput_kb_s": 812 },
+    { "id": "tu_9b1c2d", "host": "127.0.0.1", "port": 10456, "username": "u_4p8r", "latency_ms": 210, "throughput_kb_s": 344 }
+  ],
+  "pick": { "tunnel": "tu_8f3k9a", "latency_ms": 45, "throughput_kb_s": 812, "cached": true, "stale_in_s": 42 }
+}
+```
+
+#### `POST /host/pick` — (re)measure and auto-pick best
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/host/pick
+```
+
+```json
+{ "tunnel": "tu_8f3k9a", "latency_ms": 45, "throughput_kb_s": 812, "cached": false }
+```
+
+Errors: `409` (`host_target_unavailable`) when no tunnel is running to measure;
+`502` (`hostagent_unreachable`) when the hostagent is down (the measurement
+reads through each candidate tunnel and needs the engine to reach the tunnel
+loopback — the hostagent is only contacted to confirm reachability).
+
+#### `POST /host/proxy` — System Proxy on/off
+
+Body `{ "enabled": true, "tunnel": "auto" | "<tunnel id>" }`. `tunnel` is
+required to enable and defaults to the last pick when omitted; `"auto"` runs
+auto-pick. Disabling restores the desktop's proxy `mode 'none'`.
+
+```json
+{ "proxy": { "enabled": true, "tunnel": "tu_8f3k9a", "endpoint": "127.0.0.1:10244" } }
+```
+
+Errors: `409` (`host_target_unavailable`) for a missing/stopped tunnel when
+`enabled`; `409` (`host_unsupported`) when `capabilities.proxy` is `"none"`;
+`502` (`hostagent_unreachable`).
+
+#### `POST /host/tun` — TUN mode on/off
+
+Body `{ "enabled": true, "tunnel": "auto" | "<tunnel id>" }`. Enabling spawns a
+privileged sing-box TUN container in the host network namespace routing all host
+traffic through the chosen tunnel; disabling removes it. **A dead tunnel with
+TUN on takes the host's uplink down** until the mode is toggled.
+
+```json
+{ "tun": { "enabled": true, "iface": "infinity-tun0", "tunnel": "tu_8f3k9a", "endpoint": "127.0.0.1:10244" } }
+```
+
+Errors: `409` (`host_target_unavailable`) for a missing/stopped tunnel when
+`enabled`; `502` (`host_privilege`) when the host lacks TUN capability;
+`502` (`hostagent_unreachable`).
+
 ## Configuration
 
 All overridable via environment variables (defaults in brackets).
@@ -304,6 +403,13 @@ All overridable via environment variables (defaults in brackets).
 | `INFINITY_STABILITY_WORKING_SET` | `256` | Size of the alive-unassigned handshake working set re-probed by the dedicated loop |
 | `INFINITY_STABILITY_WORKING_SET_CADENCE_S` | `300` | Cadence of the working-set probe loop |
 | `INFINITY_STABILITY_REPROBE_MIN_S` | `120` | Minimum gap a node needs before the working-set loop re-probes it |
+| `INFINITY_HOST_ENABLED` | `0` | Enable host-wide features (System Proxy, TUN). `1`/`0`; a privileged hostagent container must be running (see [ADR-0010](./adr/0010-hostagent.md)) |
+| `INFINITY_HOSTAGENT_URL` | `http://127.0.0.1:8788` | Engine → hostagent base URL; tracks `INFINITY_HOSTAGENT_PORT` unless set explicitly |
+| `INFINITY_HOSTAGENT_PORT` | `8788` | Hostagent control API bind port (loopback by design) |
+| `INFINITY_HOST_PICK_TTL_S` | `60` | Auto-pick-best result cache TTL |
+| `INFINITY_HOST_PICK_TEST_URL` | `https://api.ipify.org` | URL dialed through each candidate tunnel to measure latency + throughput for auto-pick |
+| `INFINITY_HOST_PICK_SAMPLE_BYTES` | `262144` | Bytes read per candidate during auto-pick throughput measurement (256 KiB default) |
+| `INFINITY_HOST_PICK_TIMEOUT_S` | `8.0` | Per-candidate measurement cap |
 | `INFINITY_DB` | `infinity.db` | SQLite file path |
 
 Source cadences are per-source (see [docs/scraping.md](./scraping.md#source-manifest)).
@@ -320,6 +426,11 @@ Source cadences are per-source (see [docs/scraping.md](./scraping.md#source-mani
 | `tunnel_runtime` | 503 | Cannot spawn/roll a tunnel: docker daemon refused the operation (e.g. overlay mount busy); the tunnel is rolled back and no nodes are left stranded |
 | `dial_failed` | 502 | Panel egress test (`POST /tunnels/{id}/test`) could not connect through the tunnel (all its assigned nodes dead, or the tunnel is down) |
 | `internal` | 500 | Unexpected engine failure |
+| `host_features_disabled` | 409 | Host endpoints hit while `INFINITY_HOST_ENABLED` is `0` |
+| `hostagent_unreachable` | 502 | The hostagent control API is down (`INFINITY_HOSTAGENT_URL`) |
+| `host_target_unavailable` | 409 | The requested target tunnel is missing/stopped, or no tunnel is running for `"auto"` |
+| `host_unsupported` | 409 | Host capability missing for the operation (e.g. `proxy` on a host with no detected desktop) |
+| `host_privilege` | 502 | TUN mode is impossible on this host (no `/dev/net/tun`, no privilege) |
 
 ## Example session
 

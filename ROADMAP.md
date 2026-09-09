@@ -26,6 +26,18 @@ interview, and stated no's. Unstated ideas are deliberately not here.
   in live, off by default), tier/availability/working-set series in the panel,
   and benchmark-evidence-based weight tuning
   ([docs/benchmark.md](./docs/benchmark.md)).
+- Host System Proxy + TUN mode
+  ([ADR-0010](./docs/adr/0010-hostagent.md)): an opt-in privileged `hostagent`
+  container (compose profile `host`, `INFINITY_HOST_ENABLED`) drives the Docker
+  host's own traffic through a tunnel — desktop `gsettings`/KDE proxy (Linux),
+  and a host-network sing-box TUN routing all host traffic through a tunnel with
+  **auto pick best** (latency + download throughput, TTL-cached). The panel's
+  **Host** view exposes both toggles with a per-tunnel target selector and
+  re-measure; hostagent JSON contract is OS-agnostic so a native/Windows agent
+  can implement it later.
+- GitHub Pages **demo**: every push rebuilds the current `panel/static` UI plus
+  static fixtures into a hosted demo of the dashboard
+  (`.github/workflows/pages.yml`, see [docs/dashboard.md](./docs/dashboard.md)).
 - MIT license with upstream attribution (see [docs/scraping.md](./docs/scraping.md)).
 
 ## Post-v1 roadmap
@@ -81,6 +93,13 @@ Make renewal strictly avoid re-picking nodes that recently failed for a tunnel,
 and prefer candidates whose source refreshed most recently. Harder version of
 the current "don't re-assign a just-failed node" rule; needs per-tunnel failure
 history in SQLite.
+
+### Native Windows hostagent
+The [ADR-0010](./docs/adr/0010-hostagent.md) hostagent contract is OS-agnostic;
+a native Windows agent would implement the same `GET /host`, `POST /host/proxy`
+(registry system-proxy), `POST /host/tun` (wintun) surface for the engine to
+orchestrate. Tracked as a listed next step, *not* silently credited: the cross-
+platform API is spec'd and the Linux path implemented here.
 
 ### Aggregate subscription feed
 Publish the node pool as a single aggregated subscription link (vless/vmess/ss

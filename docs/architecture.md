@@ -96,6 +96,41 @@ client ──SOCKS5/HTTP──► tunnel:10244 ──urltest──► node A (fa
                                              └──► node C … k nodes
 ```
 
+### The hostagent (host system proxy + TUN)
+
+A **third, opt-in** component controls the Docker host's own traffic
+([ADR-0010](./adr/0010-hostagent.md)): `hostagent/`, run via
+`python -m hostagent` on its own loopback listener `127.0.0.1:8788`. It runs
+`network_mode: host`, `privileged: true`, and mounts the docker socket and —
+for desktop proxy support — the user session bus. It is the **only** component
+with host-wide power. The engine orchestrates it over loopback HTTP exactly as
+it orchestrates the panel; the panel stays a thin proxy.
+
+| Service | Address | Env | Default |
+| --- | --- | --- | --- |
+| Hostagent control API | `127.0.0.1:8788` | `INFINITY_HOSTAGENT_PORT` | `8788` |
+
+Deployment is gated behind a compose profile (`docker compose --profile host up
+-d`) and `INFINITY_HOST_ENABLED`, so a default stack never starts a privileged
+container. It is localhost-only and unauthenticated like the other control
+surfaces (ADR-0003 semantics — loopback is the boundary).
+
+Two host features ride on it:
+
+- **System Proxy** — sets the desktop session's default HTTP(S)/SOCKS proxy to
+  `127.0.0.1:<tunnel.port>` (GNOME `gsettings`, KDE `kwriteconfig5`; the setter
+  is capability-detected, and a host without a detected desktop reports
+  `capabilities.proxy: "none"` instead of failing). Disabling restores `none`.
+- **TUN mode** — spawns a sing-box container (same image/pattern as tunnels)
+  with a `tun` inbound (`auto_route`, `strict_route`, host network namespace)
+  whose `socks` outbound dials the selected tunnel with its credentials. The
+  whole host's traffic egresses through the tunnel. Requires a live tunnel.
+
+The engine resolves the target tunnel. `tunnel: "auto"` runs **auto-pick-best**:
+measure every running tunnel's egress (latency through the tunnel proxy, then a
+download-throughput sample), pick the best latency, tie-break by throughput, and
+cache the result for `INFINITY_HOST_PICK_TTL_S` (default 60s).
+
 ### SQLite store
 
 A single SQLite file (default `infinity.db`) on a Docker volume persists:
@@ -146,6 +181,36 @@ sequenceDiagram
     E->>S: stop & remove container
     E->>P: release nodes back to pool
     API-->>App: 204
+```
+
+## Host control flow (ADR-0010)
+
+```mermaid
+sequenceDiagram
+    participant U as Panel / API client
+    participant API as Engine control API (:8787)
+    participant E as Engine core
+    participant H as Hostagent (:8788, privileged)
+    participant T as Tunnel sing-box (:port, host net)
+
+    U->>API: POST /host/tun {enabled: true, tunnel: "auto"}
+    API->>E: resolve tun target
+    alt tunnel == "auto"
+        E->>E: measure each running tunnel (latency + throughput)
+        E-->>API: best by latency, tie-break by throughput
+    end
+    API->>H: POST /tun {endpoint: 127.0.0.1:port, user, pass}
+    H->>H: assert privileged + /dev/net/tun
+    H->>T: spawn sing-box tun container (auto_route, host netns)
+    T-->>H: tun0 in host netns, socks outbound to tunnel
+    H-->>API: {tun: {enabled: true, iface, pid}}
+    API-->>U: {enabled, tunnel, hostagent: …}
+
+    U->>API: POST /host/proxy {enabled: true, tunnel: "tu_1"}
+    API->>H: POST /proxy {endpoint: 127.0.0.1:port}
+    H->>H: gsettings/kwriteconfig mode=manual, http/https/socks=endpoint
+    H-->>API: {proxy: {enabled: true, endpoint}}
+    API-->>U: {enabled, tunnel}
 ```
 
 ## Renewal loop (the "time" axis)
@@ -218,6 +283,8 @@ The Engine never queues or blocks a create request on the pool.
   [ADR-0003](./adr/0003-localhost-control-api.md).
 - Web panel: `127.0.0.1:8000`, same localhost-only rule — see
   [ADR-0007](./adr/0007-web-panel.md) and [docs/dashboard.md](./dashboard.md).
+- Hostagent control API: `127.0.0.1:8788`, same localhost-only rule — the
+  privileged host-control surface (opt-in, see [ADR-0010](./adr/0010-hostagent.md)).
 - Mind that your public network is not published to Docker by default (see
   [CONTRIBUTING.md](../CONTRIBUTING.md)).
 - Tunnels: one published port each, from `INFINITY_TUNNEL_RANGE`. Each tunnel
@@ -243,6 +310,11 @@ InfinityProxy/
 │   ├── client.py             #   engine API client
 │   ├── history.py            #   rolling chart history
 │   └── static/               #   zero-build frontend + vendored Chart.js
+├── hostagent/                # privileged host control (ADR-0010)
+│   ├── app.py                #   loopback control API (:8788)
+│   ├── platform.py           #   capabilities, gsettings/KDE proxy setter
+│   └── singbox.py            #   TUN sing-box config renderer
+├── demo/                     # GitHub Pages demo bootstrap (static fixtures)
 ├── tunnel-image/             # Docker image wrapping sing-box for tunnels
 ├── tools/                    # benchmark harness
 ├── tests/                    # unit tests (parser, filter, assigner, app, panel)
@@ -264,3 +336,4 @@ Relevant architecture decision records:
 - [0007 Web panel (localhost, unauthenticated)](./adr/0007-web-panel.md)
 - [0008 Throughput-certified pool](./adr/0008-throughput-certified-pool.md)
 - [0009 Stability-scored assignment](./adr/0009-stability-scored-assignment.md)
+- [0010 Host system proxy + TUN via hostagent](./adr/0010-hostagent.md)
