@@ -24,7 +24,35 @@ DEMO = ROOT / "demo"
 OUT = ROOT / "_site"
 
 BOOTSTRAP_TAG = '  <script src="demo-bootstrap.js"></script>\n'
-_EXT_RE = re.compile(r'href="/docs/([^"]+)"')
+_DOCS_HREF_RE = re.compile(r'href="/docs/([^"]+)"')
+_MD_HREF_RE = re.compile(r'href="(?:\./|\.\./)([^"#]+?)\.md((?:#[^"]*)?)"')
+
+
+def _docs_href(match: re.Match[str]) -> str:
+    target = match.group(1).removesuffix(".html")
+    return f'href="{target}.html"'
+
+
+def _md_href(match: re.Match[str]) -> str:
+    # Pre-rendered pages are flattened into one dir under lowercase entry
+    # names, so `../ROADMAP.md` and `./api.md` land on the same targets.
+    # The fragment keeps its case: anchors are case-sensitive.
+    target = match.group(1).split("/")[-1].lower()
+    return f'href="{target}.html{match.group(2)}"'
+
+
+def rewrite_static_links(html_page: str) -> str:
+    """Relativise every site-root-absolute link for project Pages hosting.
+
+    The localhost panel serves at `/`, so sources use absolute paths; the
+    demo ships under `<owner>.github.io/<repo>/`, where those resolve to the
+    domain root and 404. Every pre-rendered page is flattened into
+    `_site/docs/`, so doc targets become same-dir basenames.
+    """
+    html_page = _DOCS_HREF_RE.sub(_docs_href, html_page)
+    html_page = _MD_HREF_RE.sub(_md_href, html_page)
+    html_page = html_page.replace('href="/app.css"', 'href="../app.css"')
+    return html_page.replace('href="/"', 'href="../"')
 
 
 def main() -> None:
@@ -52,17 +80,19 @@ def _build_docs(docs_out: Path) -> None:
     for entry in _docs.discover():
         title, body = _docs.render_doc(entry)
         html_page = _docs.page_html(title, body, entry["name"])
-        html_page = _EXT_RE.sub(r'href="/docs/\1.html"', html_page)
-        (docs_out / f"{entry['name']}.html").write_text(html_page, encoding="utf-8")
+        (docs_out / f"{entry['name']}.html").write_text(
+            rewrite_static_links(html_page), encoding="utf-8"
+        )
 
     entries = _docs.discover()
     links = "".join(
-        f'<p><a href="/docs/{escape(e["name"])}.html">{escape(e["label"])}</a></p>'
+        f'<p><a href="{escape(e["name"])}.html">{escape(e["label"])}</a></p>'
         for e in entries
     )
     landing = _docs.page_html("Index", f"<h1>Docs</h1>\n{links}", "index")
-    landing = _EXT_RE.sub(r'href="/docs/\1.html"', landing)
-    (docs_out / "index.html").write_text(landing, encoding="utf-8")
+    (docs_out / "index.html").write_text(
+        rewrite_static_links(landing), encoding="utf-8"
+    )
 
 
 if __name__ == "__main__":
