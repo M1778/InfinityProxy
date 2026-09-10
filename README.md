@@ -160,7 +160,8 @@ The pool is built from these public, auto-updated feeds (full details in
 
 ## Hosted demo
 
-A statically-built snapshot of the panel ([GitHub Actions → Pages](./.github/workflows/pages.yml))
+**Live demo: <https://m1778.github.io/InfinityProxy/>** — a statically-built
+snapshot of the panel ([GitHub Actions → Pages](./.github/workflows/pages.yml))
 runs against in-memory fake data and a simulated SSE stream, so the whole UI —
 Overview, Tunnels, Nodes, Sources, **Host** and the **Docs** page — can be
 explored without a live engine. Sources: [pages.yml](./.github/workflows/pages.yml),
