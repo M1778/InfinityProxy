@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from engine.assigner import Assigner
 from engine.config import Settings
-from engine.models import Tunnel
+from engine.models import Node, Tunnel
 from engine.scheduler import Engine
 
 
@@ -78,3 +78,63 @@ def test_reconcile_frees_orphan_assignments_and_keeps_live_ones():
     assert store.released == ["tu_ghost"]
     assert store.assigned_tunnel_ids() == {"tu_live"}
     assert store.load_tunnels()[0].state == "running"
+
+
+def _alive_node(node_id: str) -> Node:
+    return Node(
+        node_id=node_id,
+        uri=f"vless://u@{node_id}.example.com:443?encryption=none#n",
+        protocol="vless",
+        server=f"{node_id}.example.com",
+        port=443,
+        user="u",
+        source="bench",
+        first_seen_s=0.0,
+        state="alive",
+    )
+
+
+class StatusStore(FakeStore):
+    def __init__(self, nodes: list[Node], in_use: set[str]) -> None:
+        super().__init__()
+        self._nodes = nodes
+        self._in_use = in_use
+        self.in_use_calls = 0
+
+    def sources_summary(self) -> list[dict]:  # type: ignore[no-untyped-def]
+        return []
+
+    def pool_counts(self, **kwargs) -> dict:  # type: ignore[no-untyped-def]
+        return {
+            "total": len(self._nodes),
+            "alive": len(self._nodes),
+            "dead": 0,
+            "untested": 0,
+            "in_use": len(self._in_use),
+            "tier_a": 0,
+            "tier_b": 0,
+            "working_set": 0,
+            "avg_score": None,
+        }
+
+    def pool_by_protocol(self) -> list:
+        return []
+
+    def load_nodes(self, state=None, protocols=None) -> list[Node]:  # type: ignore[no-untyped-def]  # noqa: ANN001
+        return list(self._nodes)
+
+    def node_ids_in_use(self) -> set[str]:
+        self.in_use_calls += 1
+        return set(self._in_use)
+
+
+def test_engine_status_resolves_assignments_with_one_store_query():
+    store = StatusStore(
+        [_alive_node("n1"), _alive_node("n2"), _alive_node("n3")], {"n1"}
+    )
+    engine = make_engine(store)
+
+    status = engine.engine_status()
+
+    assert status["pool"]["assignable"] == 2
+    assert store.in_use_calls == 1

@@ -376,6 +376,14 @@ class Engine:
                 stale += 1
             elif now - float(last) > source.cadence_s * 2:
                 stale += 1
+        in_use = self.store.node_ids_in_use()
+        assignable = sum(
+            1
+            for n in self.store.load_nodes(
+                state="alive", protocols=set(ASSIGNABLE_PROTOCOLS)
+            )
+            if n.node_id not in in_use
+        )
         return {
             "engine": "ok",
             "uptime_s": int(now - self._started_s),
@@ -390,13 +398,7 @@ class Engine:
                 "working_set": pool["working_set"],
                 "avg_score": pool["avg_score"],
                 "by_protocol": self.store.pool_by_protocol(),
-                "assignable": sum(
-                    1
-                    for n in self.store.load_nodes(
-                        state="alive", protocols=set(ASSIGNABLE_PROTOCOLS)
-                    )
-                    if n.node_id not in self.store.node_ids_in_use()
-                ),
+                "assignable": assignable,
                 "working_set_next_s": (
                     max(
                         0,
