@@ -140,24 +140,24 @@ let chartThemeApplied = false;
 function applyChartTheme() {
   if (chartThemeApplied || !window.Chart) return;
   chartThemeApplied = true;
-  Chart.defaults.color = "#8fa3a0";
-  Chart.defaults.borderColor = "#1d272c";
-  Chart.defaults.font = { family: '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', size: 10.5 };
+  Chart.defaults.color = "#5d6b8c";
+  Chart.defaults.borderColor = "#dfe6f3";
+  Chart.defaults.font = { family: '"Inter", "Helvetica Neue", Arial, system-ui, sans-serif', size: 10.5 };
   Chart.defaults.animation = false;
-  Chart.defaults.scale.grid.color = "#11181c";
+  Chart.defaults.scale.grid.color = "#e6ebf5";
   Chart.defaults.plugins.legend.position = "bottom";
   Chart.defaults.plugins.legend.labels.usePointStyle = true;
   Chart.defaults.plugins.legend.labels.boxWidth = 6;
-  Chart.defaults.plugins.legend.labels.color = "#8fa3a0";
-  Chart.defaults.plugins.tooltip.backgroundColor = "rgba(12,16,19,.96)";
-  Chart.defaults.plugins.tooltip.borderColor = "#2c3a3f";
+  Chart.defaults.plugins.legend.labels.color = "#5d6b8c";
+  Chart.defaults.plugins.tooltip.backgroundColor = "rgba(29,42,94,.96)";
+  Chart.defaults.plugins.tooltip.borderColor = "#1d2a5e";
   Chart.defaults.plugins.tooltip.borderWidth = 1;
   Chart.defaults.plugins.tooltip.cornerRadius = 8;
   Chart.defaults.plugins.tooltip.padding = 10;
   Chart.defaults.plugins.tooltip.boxPadding = 4;
   Chart.defaults.plugins.tooltip.usePointStyle = true;
-  Chart.defaults.plugins.tooltip.titleColor = "#d7e2ec";
-  Chart.defaults.plugins.tooltip.bodyColor = "#d7e2ec";
+  Chart.defaults.plugins.tooltip.titleColor = "#ffffff";
+  Chart.defaults.plugins.tooltip.bodyColor = "#dfe6f3";
 }
 
 function fmtClock(ms) {
@@ -194,12 +194,12 @@ function redrawCharts() {
     state.panels.pool = new Chart($("#pool-chart"), {
       type: "line",
       data: { datasets: [
-        { label: "dead", data: pooled("pool_dead"), stack: "pool", fill: true, backgroundColor: "rgba(255,107,94,.18)", borderColor: "#ff6b5e", borderWidth: 1.5, pointRadius: 0, tension: 0 },
-        { label: "untested", data: pooled("pool_untested"), stack: "pool", fill: true, backgroundColor: "rgba(138,153,160,.18)", borderColor: "#8a99a0", borderWidth: 1.5, pointRadius: 0, tension: 0 },
-        { label: "alive", data: pooled("pool_alive"), stack: "pool", fill: true, backgroundColor: "rgba(99,230,160,.18)", borderColor: "#63e6a0", borderWidth: 1.5, pointRadius: 0, tension: 0 },
-        { label: "in_use", data: pooled("pool_in_use"), stack: "overlay", fill: false, borderColor: "#f2a93b", borderWidth: 1.5, pointRadius: 0, tension: 0 },
-        { label: "tier_a", data: pooled("pool_tier_a"), fill: false, borderColor: "#4fd8ff", borderWidth: 1.5, borderDash: [2, 2], pointRadius: 0, tension: 0 },
-        { label: "avg_score", data: pooled("pool_avg_score"), yAxisID: "y1", fill: false, borderColor: "#9fb8d8", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+        { label: "dead", data: pooled("pool_dead"), stack: "pool", fill: true, backgroundColor: "rgba(216,74,62,.14)", borderColor: "#d84a3e", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+        { label: "untested", data: pooled("pool_untested"), stack: "pool", fill: true, backgroundColor: "rgba(147,160,184,.25)", borderColor: "#93a0b8", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+        { label: "alive", data: pooled("pool_alive"), stack: "pool", fill: true, backgroundColor: "rgba(18,165,111,.16)", borderColor: "#12a56f", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+        { label: "in_use", data: pooled("pool_in_use"), stack: "overlay", fill: false, borderColor: "#d79a1e", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+        { label: "tier_a", data: pooled("pool_tier_a"), fill: false, borderColor: "#2f4bd7", borderWidth: 1.5, borderDash: [2, 2], pointRadius: 0, tension: 0 },
+        { label: "avg_score", data: pooled("pool_avg_score"), yAxisID: "y1", fill: false, borderColor: "#7c8ab0", borderWidth: 1.5, pointRadius: 0, tension: 0 },
       ]},
       options: {
         parsing: false,
@@ -228,8 +228,8 @@ function redrawCharts() {
     state.panels.tunnel = new Chart($("#tunnel-chart"), {
       type: "line",
       data: { datasets: [
-        { label: "active", data: pooled("tunnel_active"), fill: true, backgroundColor: "rgba(79,216,255,.15)", borderColor: "#4fd8ff", borderWidth: 1.5, pointRadius: 0, stepped: true, tension: 0 },
-        { label: "degraded", data: pooled("tunnel_degraded"), fill: false, borderColor: "#ff6b5e", borderWidth: 1, borderDash: [4, 4], pointRadius: 0, stepped: true, tension: 0 },
+        { label: "active", data: pooled("tunnel_active"), fill: true, backgroundColor: "rgba(47,75,215,.12)", borderColor: "#2f4bd7", borderWidth: 1.5, pointRadius: 0, stepped: true, tension: 0 },
+        { label: "degraded", data: pooled("tunnel_degraded"), fill: false, borderColor: "#d84a3e", borderWidth: 1, borderDash: [4, 4], pointRadius: 0, stepped: true, tension: 0 },
       ]},
       options: {
         parsing: false,
@@ -263,9 +263,9 @@ function drawProtocolChart(rows) {
       data: {
         labels,
         datasets: [
-          { label: "alive", data: sorted.map((r) => r.alive), backgroundColor: "#63e6a0" },
-          { label: "untested", data: sorted.map((r) => r.untested), backgroundColor: "#8a99a0" },
-          { label: "dead", data: sorted.map((r) => r.dead), backgroundColor: "#ff6b5e" },
+          { label: "alive", data: sorted.map((r) => r.alive), backgroundColor: "#12a56f" },
+          { label: "untested", data: sorted.map((r) => r.untested), backgroundColor: "#93a0b8" },
+          { label: "dead", data: sorted.map((r) => r.dead), backgroundColor: "#d84a3e" },
         ],
       },
       options: {
@@ -308,8 +308,8 @@ function drawPoolDonut(pool) {
         labels: ["alive", "untested", "dead"],
         datasets: [{
           data,
-          backgroundColor: ["#63e6a0", "#8a99a0", "#ff6b5e"],
-          borderColor: "#0e1417",
+          backgroundColor: ["#12a56f", "#93a0b8", "#d84a3e"],
+          borderColor: "#ffffff",
           borderWidth: 2,
           borderRadius: 4,
           spacing: 2,
