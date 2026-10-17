@@ -340,3 +340,4 @@ Relevant architecture decision records:
 - [0008 Throughput-certified pool](./adr/0008-throughput-certified-pool.md)
 - [0009 Stability-scored assignment](./adr/0009-stability-scored-assignment.md)
 - [0010 Host system proxy + TUN via hostagent](./adr/0010-hostagent.md)
+- [0011 Throughput target + probe Host header](./adr/0011-throughput-target-and-host-header.md)

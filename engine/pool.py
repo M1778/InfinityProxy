@@ -13,9 +13,21 @@ from engine.config import Settings
 from engine.db import Store
 from engine.filter.probe import ThroughputSpec, probeable
 from engine.filter.runner import batch_probe
-from engine.models import ProbeResult, SourceManifest
+from engine.models import Node, ProbeResult, SourceManifest
 from engine.scraper import SOURCES, dedup, fetch_text, parse_feed
 from engine.tunnel.config import _outbound_from_node
+
+# Untested nodes are probed in protocol tiers, not pure scrape order: gfpcom
+# publishes hundreds of thousands of HTTP proxies that are slow to reject, so a
+# FIFO pass spends the whole budget on them while the v2ray protocols tunnels
+# actually prefer starve. Relay-certified protocols first, then the protocols
+# the probe cannot certify at all (rejected without touching the network), then
+# the forward proxies.
+_PROBE_TIERS: tuple[tuple[str, ...], ...] = (
+    ("vless", "trojan", "ss"),
+    ("vmess", "tuic", "hysteria2", "ssr"),
+    ("http", "socks5"),
+)
 
 
 def seed_sources(store: Store) -> None:
@@ -136,14 +148,26 @@ def demote_unrenderable(store: Store) -> int:
 
 
 def _probe_new(store: Store, settings: Settings, source: SourceManifest) -> None:
-    # A bounded FIFO slice of everything never probed, plus this source's dead
-    # retest sample: docs/scraping.md stages the pass across cadences so one
-    # flooded feed cannot stall every other source's refresh. Fresh nodes
-    # surface incrementally because each refresh advances through untested it
-    # probed last time (dead & alive rows leave the untested set).
-    untested = store.load_nodes(
-        state="untested", limit=settings.probe_budget_per_refresh, oldest_first=True
-    )
+    # A bounded slice of everything never probed, walked in `_PROBE_TIERS` order
+    # so the budget reaches the tunnel-preferred protocols first (and the
+    # unprobeable ones, which are dismissed without a network round-trip, before
+    # the slow-to-reject forward proxies). Plus this source's dead retest
+    # sample: docs/scraping.md stages the pass across cadences so one flooded
+    # feed cannot stall every other source's refresh. Fresh nodes surface
+    # incrementally because each refresh advances through what it probed last
+    # time (dead & alive rows leave the untested set).
+    untested: list[Node] = []
+    for tier in _PROBE_TIERS:
+        if len(untested) >= settings.probe_budget_per_refresh:
+            break
+        untested.extend(
+            store.load_nodes(
+                state="untested",
+                protocols=set(tier),
+                limit=settings.probe_budget_per_refresh - len(untested),
+                oldest_first=True,
+            )
+        )
     dead = store.load_nodes(state="dead", source=source.name)
     nodes = untested + dead[: settings.batch_size]
     if not nodes:

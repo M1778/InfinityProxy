@@ -138,3 +138,56 @@ def test_engine_status_resolves_assignments_with_one_store_query():
 
     assert status["pool"]["assignable"] == 2
     assert store.in_use_calls == 1
+
+
+class HealStore(FakeStore):
+    def __init__(self, tunnel: Tunnel, node: Node) -> None:
+        super().__init__()
+        self.save_tunnel(tunnel)
+        self._nodes = {node.node_id: node}
+        self._assignment = {node.node_id: tunnel.tunnel_id}
+
+    def get_tunnel(self, tunnel_id: str) -> Tunnel | None:
+        return self._tunnels.get(tunnel_id)
+
+    def node_ids_assigned_to(self, tunnel_id: str) -> list[str]:
+        return [nid for nid, owner in self._assignment.items() if owner == tunnel_id]
+
+    def get_node(self, node_id: str) -> Node | None:
+        return self._nodes.get(node_id)
+
+
+class HealController:
+    def __init__(self, running: bool) -> None:
+        self.running = running
+        self.is_running_calls = 0
+        self.updated: list[str] = []
+
+    def is_running(self, tunnel_id: str) -> bool:  # noqa: ARG002
+        self.is_running_calls += 1
+        return self.running
+
+    def update(self, tunnel_id: str, config: dict) -> None:  # noqa: ARG002
+        self.updated.append(tunnel_id)
+
+
+def test_health_check_skips_tunnel_under_creation():
+    tunnel = make_tunnel("tu_starting", state="starting")
+    store = HealStore(tunnel, _alive_node("n1"))
+    controller = HealController(running=False)
+    engine = Engine(Settings(), store, Assigner(Settings()), controller)
+
+    assert engine.health_check(tunnel) == (0, 0)
+    assert controller.is_running_calls == 0
+    assert controller.updated == []
+
+
+def test_self_heal_redeploys_running_tunnel_without_container():
+    tunnel = make_tunnel("tu_live", state="running")
+    store = HealStore(tunnel, _alive_node("n1"))
+    controller = HealController(running=False)
+    engine = Engine(Settings(), store, Assigner(Settings()), controller)
+
+    engine._self_heal("tu_live")
+
+    assert controller.updated == ["tu_live"]

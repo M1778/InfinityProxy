@@ -204,6 +204,11 @@ Responses **201**:
 > tunnel is still created with what's available — `node_count_granted` will be
 > lower and the renewal loop tops the tunnel up. This is **not** an error.
 
+> **First use:** tunnel containers run `INFINITY_SINGBOX_IMAGE`
+> (`ghcr.io/sagernet/sing-box:v1.11.6` by default). When that image is not
+> present locally, the engine pulls it before starting the container, so the
+> very first `POST /tunnels` on a fresh host can take as long as the pull.
+
 Errors: `400` on invalid body (e.g. `node_count: 0`).
 
 ### `GET /tunnels` — list tunnels
@@ -370,7 +375,10 @@ Errors: `409` (`host_target_unavailable`) for a missing/stopped tunnel when
 
 ## Configuration
 
-All overridable via environment variables (defaults in brackets).
+All overridable via environment variables (defaults in brackets). The shipped
+`docker-compose.yml` forwards every variable in this table — plus the rest of
+the `INFINITY_*` knobs `engine/config.py` reads — to the engine container, so
+setting them in `.env` works.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -392,7 +400,7 @@ All overridable via environment variables (defaults in brackets).
 | `INFINITY_THROUGHPUT_MIN_KB_S` | `200` | Admission floor: nodes certified below this many KiB/s are demoted at probe time |
 | `INFINITY_THROUGHPUT_SAMPLE_BYTES` | `1048576` | Bytes the probe reads from the throughput target per node (1 MiB default) |
 | `INFINITY_THROUGHPUT_TIMEOUT_S` | `12` | Per-node cap on the throughput download; a node that cannot deliver the sample in this window drops below the floor |
-| `INFINITY_THROUGHPUT_HOST` / `_PORT` / `_PATH` | `speedtest.tele2.net` / `80` / `/1MB.bin` | Throughput target the probe downloads through each node |
+| `INFINITY_THROUGHPUT_HOST` / `_PORT` / `_PATH` | `speed.cloudflare.com` / `80` / `/__down?bytes=10485760` | Throughput target the probe downloads through each node (ADR-0011); every relayed GET carries a `Host:` header |
 | `INFINITY_STABILITY_ENABLED` | `1` | Accumulate windowed probe counters and assign nodes by stability score (ADR-0009). Set `0`/`false`/`no` for the legacy throughput-first order |
 | `INFINITY_STABILITY_MIN_PROBES` | `6` | Verdicts a node needs before it is *evaluated*; fewer probes = cold, sorted after every evaluated node |
 | `INFINITY_STABILITY_MIN_AVAIL` | `0.4` | Availability floor separating Tier A (reliable) from Tier B |

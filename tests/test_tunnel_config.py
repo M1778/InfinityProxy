@@ -391,9 +391,22 @@ class FakeContainers:
         return containers
 
 
+class FakeImages:
+    def __init__(self) -> None:
+        self.pull_calls: list[str] = []
+
+    def get(self, name: str) -> object:
+        return object()
+
+    def pull(self, name: str) -> object:
+        self.pull_calls.append(name)
+        return object()
+
+
 class FakeDocker:
     def __init__(self) -> None:
         self.containers = FakeContainers()
+        self.images = FakeImages()
 
 
 SETTINGS = Settings()

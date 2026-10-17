@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json as _json
+import logging
 import tarfile
 from typing import Any
 
@@ -32,6 +33,8 @@ except ImportError:
 
 
 _CONFIG_PATH = "/etc/sing-box/config.json"
+
+logger = logging.getLogger("infinity.tunnel")
 
 
 class TunnelRuntimeUnavailable(RuntimeError):
@@ -118,8 +121,33 @@ class ContainerController:
             if suffix not in expected_ids:
                 container.remove(force=True)
 
+    def _ensure_image(self) -> None:
+        """Pull the sing-box image when it is not present locally.
+
+        `containers.create` does not pull implicitly, so on a host that has
+        never run a tunnel the first start would fail with the daemon's bare
+        "No such image" 404. Pull once; later creates find it locally.
+        """
+        client = self.docker
+        image = self._settings.singbox_image
+        try:
+            client.images.get(image)
+            return
+        except (_ContainerNotFound, KeyError):
+            pass
+        except _docker_api_error() as exc:
+            raise TunnelRuntimeUnavailable(str(exc)) from exc
+        logger.info("pulling sing-box image %s (not present locally)", image)
+        try:
+            client.images.pull(image)
+        except _docker_api_error() as exc:
+            raise TunnelRuntimeUnavailable(
+                f"cannot pull sing-box image {image!r}: {exc}"
+            ) from exc
+
     def _run(self, name: str, config: dict) -> None:
         client = self.docker
+        self._ensure_image()
         try:
             container = client.containers.create(
                 self._settings.singbox_image,

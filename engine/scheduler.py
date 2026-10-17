@@ -137,6 +137,13 @@ class Engine:
 
     def _health_check_locked(self, tunnel: Tunnel) -> tuple[int, int]:
         tunnel_id = tunnel.tunnel_id
+        if tunnel.state == "starting":
+            # The row exists but the container may still be under construction:
+            # POST /tunnels flips the state to running only after the container
+            # is up, and the first-use sing-box image pull makes that window
+            # tens of seconds wide. Probing or redeploying now would race the
+            # creator for the same container name.
+            return 0, 0
         self._last_check[tunnel_id] = time.time()
         assigned = [
             n
@@ -259,8 +266,8 @@ class Engine:
         )
         try:
             self.controller.update(tunnel_id, config)
-        except TunnelRuntimeUnavailable:
-            logger.warning("docker unreachable; tunnel %s not redeployed", tunnel_id)
+        except TunnelRuntimeUnavailable as exc:
+            logger.warning("tunnel %s not redeployed: %s", tunnel_id, exc)
             return False
         self._rendered[tunnel_id] = (signature, config)
         return True

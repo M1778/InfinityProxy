@@ -143,6 +143,22 @@ def test_admit_batch_demotes_missing_and_slow_throughput() -> None:
     assert "failed throughput certification" in store2.saved[node2.node_id].error
 
 
+def test_admit_batch_disabled_gate_admits_without_throughput() -> None:
+    from engine.config import Settings
+
+    good = make_node("nd_off", GOOD_SS)
+    store = FakeProbeBatchStore()
+    store.nodes = {good.node_id: good}
+
+    _admit_batch(
+        store,
+        {good.node_id: ProbeResult(good.node_id, alive=True, throughput_kb_s=None)},
+        settings=Settings(throughput_enabled=False),
+    )
+
+    assert store.saved[good.node_id].alive is True
+
+
 def test_admit_batch_records_stability_counters_when_enabled() -> None:
     from engine.config import Settings
 
@@ -201,6 +217,7 @@ def test_pool_store_roundtrip_garbage_node_is_dead() -> None:
         _admit_batch(store, {node.node_id: ProbeResult(node.node_id, alive=True)})
         assert store.pool_counts()["alive"] == 0
         assert store.get_node(node.node_id).state == "dead"
+        store.close()
 
 
 def test_demote_unrenderable_sweeps_alive_garbage() -> None:
@@ -241,6 +258,7 @@ def test_demote_unrenderable_sweeps_alive_garbage() -> None:
         assert demoted == 1
         assert store.pool_counts()["alive"] == 1
         assert store.pool_counts()["dead"] == 1
+        store.close()
 
 
 def test_demote_sweep_rejects_ws_transport_alive() -> None:
@@ -273,6 +291,79 @@ def test_demote_sweep_rejects_ws_transport_alive() -> None:
         assert demoted == 1
         assert store.pool_counts()["alive"] == 0
         assert store.pool_counts()["dead"] == 1
+        store.close()
+
+
+def test_probe_new_probes_relay_protocols_before_the_forward_flood(
+    monkeypatch,
+) -> None:
+    from engine.config import Settings
+    from engine.models import NodeCandidate, SourceManifest
+    from engine.pool import _probe_new
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = Store(str(Path(tmp) / "t.db"))
+        store.create_schema()
+        # The forward proxies are scraped first, so FIFO would spend the whole
+        # budget on them before ever reaching the vless nodes.
+        store.upsert_candidates(
+            [
+                NodeCandidate(
+                    uri=f"http://10.0.0.{i}:8080",
+                    protocol="http",
+                    server=f"10.0.0.{i}",
+                    port=8080,
+                    user=None,
+                    source="test",
+                )
+                for i in range(1, 7)
+            ]
+        )
+        store.upsert_candidates(
+            [
+                NodeCandidate(
+                    uri=f"vless://abc@2.0.0.{i}:443?type=tcp",
+                    protocol="vless",
+                    server=f"2.0.0.{i}",
+                    port=443,
+                    user="abc",
+                    source="test",
+                )
+                for i in range(1, 4)
+            ]
+        )
+        source = SourceManifest(
+            name="test",
+            urls=(),
+            cadence_s=60,
+            encoding="plain",
+            line_separated=True,
+            license="",
+            protocols=(),
+        )
+        settings = Settings(batch_size=50, probe_budget_per_refresh=3)
+        probed: list[list[str]] = []
+
+        def fake_batch_probe(nodes, **kwargs):
+            probed.append([n.protocol for n in nodes])
+            for node in nodes:
+                kwargs["on_batch"](
+                    {node.node_id: ProbeResult(node.node_id, alive=False)}
+                )
+            return {}
+
+        monkeypatch.setattr("engine.pool.batch_probe", fake_batch_probe)
+        _probe_new(store, settings, source)
+
+        # Budget 3: the three vless nodes, never an http proxy.
+        assert probed == [["vless", "vless", "vless"]]
+
+        # Once the relay tier is drained the budget falls through to the
+        # forward proxies rather than staying stuck on them forever.
+        settings = Settings(batch_size=50, probe_budget_per_refresh=100)
+        _probe_new(store, settings, source)
+        assert probed[1][:6] == ["http"] * 6
+        store.close()
 
 
 def test_probe_new_respects_untested_budget() -> None:
@@ -332,7 +423,8 @@ def test_probe_new_respects_untested_budget() -> None:
             pool_mod.batch_probe = original
 
         # Two refreshes, budget 2 each: the first drains 2 untested that become
-        # dead; the second takes the next 2 untested (FIFO) plus up to batch_size
-        # of this source's dead nodes for retest. No single refresh drains the
-        # whole queue: dead + untested stay bounded.
+        # dead; the second takes the next 2 untested (tier order) plus up to
+        # batch_size of this source's dead nodes for retest. No single refresh
+        # drains the whole queue: dead + untested stay bounded.
         assert probed == [2, 4]
+        store.close()

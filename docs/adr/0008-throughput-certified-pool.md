@@ -3,6 +3,8 @@
 - Status: **accepted**
 - Date: 2026-09-09
 - Extends: [ADR-0006](./0006-relay-grade-liveness-probes.md)
+- Amended by: [ADR-0011](./0011-throughput-target-and-host-header.md)
+  (throughput target and probe Host header)
 
 ## Context
 
