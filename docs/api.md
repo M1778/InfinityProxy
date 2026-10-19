@@ -10,8 +10,8 @@ Proxy, TUN mode) are driven through the privileged **hostagent** at
 [ADR-0010](./adr/0010-hostagent.md). For deployments serving other operators,
 the **control center** (`tenancy` package, `127.0.0.1:8790`) fronts the engine
 with tenant accounts, API keys, tunnel scoping, and credit metering — see
-[Control center](#control-center-adr-0011) below and
-[ADR-0011](./adr/0011-multi-tenant-control-center.md).
+[Control center](#control-center-adr-0012) below and
+[ADR-0012](./adr/0012-multi-tenant-control-center.md).
 
 > **Security:** in v1 the control API and the panel are bound to localhost and
 > are **unauthenticated by design**. Don't publish them to any network. See
@@ -219,6 +219,11 @@ Responses **201**:
 > tunnel is still created with what's available — `node_count_granted` will be
 > lower and the renewal loop tops the tunnel up. This is **not** an error.
 
+> **First use:** tunnel containers run `INFINITY_SINGBOX_IMAGE`
+> (`ghcr.io/sagernet/sing-box:v1.11.6` by default). When that image is not
+> present locally, the engine pulls it before starting the container, so the
+> very first `POST /tunnels` on a fresh host can take as long as the pull.
+
 Errors: `400` on invalid body (e.g. `node_count: 0`).
 
 ### `GET /tunnels` — list tunnels
@@ -393,7 +398,7 @@ Errors: `409` (`host_target_unavailable`) for a missing/stopped tunnel when
 `enabled`; `502` (`host_privilege`) when the host lacks TUN capability;
 `502` (`hostagent_unreachable`).
 
-## Control center (ADR-0011)
+## Control center (ADR-0012)
 
 The `tenancy` package is the multi-tenant front for the engine, a separate
 Flask service on **`127.0.0.1:8790`** (`python -m tenancy`, compose profile
@@ -477,7 +482,10 @@ curl -s -X DELETE "http://127.0.0.1:8790/v1/me/tunnels/$(
 
 ## Configuration
 
-All overridable via environment variables (defaults in brackets).
+All overridable via environment variables (defaults in brackets). The shipped
+`docker-compose.yml` forwards every variable in this table — plus the rest of
+the `INFINITY_*` knobs `engine/config.py` reads — to the engine container, so
+setting them in `.env` works.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -500,7 +508,7 @@ All overridable via environment variables (defaults in brackets).
 | `INFINITY_THROUGHPUT_MIN_KB_S` | `200` | Admission floor: nodes certified below this many KiB/s are demoted at probe time |
 | `INFINITY_THROUGHPUT_SAMPLE_BYTES` | `1048576` | Bytes the probe reads from the throughput target per node (1 MiB default) |
 | `INFINITY_THROUGHPUT_TIMEOUT_S` | `12` | Per-node cap on the throughput download; a node that cannot deliver the sample in this window drops below the floor |
-| `INFINITY_THROUGHPUT_HOST` / `_PORT` / `_PATH` | `speedtest.tele2.net` / `80` / `/1MB.bin` | Throughput target the probe downloads through each node |
+| `INFINITY_THROUGHPUT_HOST` / `_PORT` / `_PATH` | `speed.cloudflare.com` / `80` / `/__down?bytes=10485760` | Throughput target the probe downloads through each node (ADR-0012); every relayed GET carries a `Host:` header |
 | `INFINITY_STABILITY_ENABLED` | `1` | Accumulate windowed probe counters and assign nodes by stability score (ADR-0009). Set `0`/`false`/`no` for the legacy throughput-first order |
 | `INFINITY_STABILITY_MIN_PROBES` | `6` | Verdicts a node needs before it is *evaluated*; fewer probes = cold, sorted after every evaluated node |
 | `INFINITY_STABILITY_MIN_AVAIL` | `0.4` | Availability floor separating Tier A (reliable) from Tier B |
@@ -520,7 +528,7 @@ All overridable via environment variables (defaults in brackets).
 | `INFINITY_HOST_PICK_TIMEOUT_S` | `8.0` | Per-candidate measurement cap |
 | `INFINITY_DB` | `infinity.db` | SQLite file path |
 
-Control center settings (`INFINITY_TENANCY_*`, ADR-0011):
+Control center settings (`INFINITY_TENANCY_*`, ADR-0012):
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -559,7 +567,7 @@ Source cadences are per-source (see [docs/scraping.md](./scraping.md#source-mani
 | `host_unsupported` | 409 | Host capability missing for the operation (e.g. `proxy` on a host with no detected desktop) |
 | `host_privilege` | 502 | TUN mode is impossible on this host (no `/dev/net/tun`, no privilege) |
 
-Control center error codes (ADR-0011):
+Control center error codes (ADR-0012):
 
 | Code | HTTP | Meaning |
 | --- | --- | --- |

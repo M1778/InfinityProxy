@@ -1,4 +1,4 @@
-"""Settings for the multi-tenant control center (ADR-0011).
+"""Settings for the multi-tenant control center (ADR-0012).
 
 Env prefix `INFINITY_TENANCY_*`; every value overridable via the environment
 table in docs/api.md#control-center-configuration.

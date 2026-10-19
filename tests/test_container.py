@@ -31,9 +31,29 @@ class _FakeContainer:
         pass
 
 
+class _FakeImages:
+    def __init__(self) -> None:
+        self.missing = False
+        self.pulled: list[str] = []
+        self.pull_error: Exception | None = None
+
+    def get(self, name: str) -> object:
+        if self.missing:
+            raise docker.errors.ImageNotFound(name)
+        return object()
+
+    def pull(self, name: str) -> object:
+        if self.pull_error is not None:
+            raise self.pull_error
+        self.pulled.append(name)
+        self.missing = False
+        return object()
+
+
 class _FakeDocker:
     def __init__(self) -> None:
         self.created: _FakeContainer | None = None
+        self.images = _FakeImages()
 
     def ping(self) -> None:
         pass
@@ -78,3 +98,25 @@ def test_start_translates_docker_api_error():
         controller.start(_tunnel(), {"outbounds": []})
     assert fake.created is not None
     assert fake.created._removed
+    assert fake.images.pulled == []
+
+
+def test_first_use_pulls_missing_singbox_image():
+    controller, fake = _controller()
+    fake.images.missing = True
+    with pytest.raises(TunnelRuntimeUnavailable, match="device or resource busy"):
+        controller.start(_tunnel(), {"outbounds": []})
+    assert fake.images.pulled == ["ghcr.io/sagernet/sing-box:v1.11.6"]
+    assert fake.created is not None  # creation was attempted after the pull
+
+
+def test_image_pull_failure_is_translated():
+    controller, fake = _controller()
+    fake.images.missing = True
+    fake.images.pull_error = docker.errors.APIError(
+        '500 Server Error: Internal Server Error ("pull access denied")'
+    )
+    with pytest.raises(TunnelRuntimeUnavailable, match="cannot pull sing-box image"):
+        controller.start(_tunnel(), {"outbounds": []})
+    assert fake.created is None  # aborted before create
+    assert fake.images.pulled == []

@@ -100,13 +100,16 @@ that means:
 
 Since [ADR-0008](./adr/0008-throughput-certified-pool.md), admission has a
 second stage: after the relay handshake passes, the probe reads a download from
-a throughput target *through* the node. A node is certified alive only if that
-download delivers at least `INFINITY_THROUGHPUT_MIN_KB_S` — a handshake that
-relays nothing, or a relay slower than the floor, is demoted at admission. The
-measured KiB/s is stored on the node (`throughput_kb_s`), survives the
-handshake-only health loop, and is what the assigner prefers when filling
-tunnels. The throughput stage applies at admission only; the 30s health check
-stays a cheap handshake so the loop never hammers the host link.
+a throughput target *through* the node (default `speed.cloudflare.com`'s HTTP
+speed-test endpoint, [ADR-0011](./adr/0011-throughput-target-and-host-header.md);
+the relayed `HTTP/1.0` GET carries an explicit `Host:` header). A node is
+certified alive only if that download delivers at least
+`INFINITY_THROUGHPUT_MIN_KB_S` — a handshake that relays nothing, or a relay
+slower than the floor, is demoted at admission. The measured KiB/s is stored on
+the node (`throughput_kb_s`), survives the handshake-only health loop, and is
+what the assigner prefers when filling tunnels. The throughput stage applies at
+admission only; the 30s health check stays a cheap handshake so the loop never
+hammers the host link.
 
 Since [ADR-0009](./adr/0009-stability-scored-assignment.md), the engine
 **remembers** these verdicts instead of throwing them away: every admission and
@@ -132,12 +135,18 @@ until re-probed. The survival schema details live in
   pays the dial wait once, not per variant; listeners that accept are never
   memoized.
 - Each source refresh probes at most `INFINITY_PROBE_BUDGET_PER_REFRESH`
-  untested nodes, oldest-scraped first, plus `INFINITY_DEAD_RETEST_BUDGET`
+  untested nodes in protocol-tier order — the relay-certified protocols
+  (`vless`, `trojan`, `ss`) first, then the protocols the probe cannot certify
+  (`vmess`, `tuic`, `hysteria2`, `ssr`; dismissed without a network
+  round-trip), then the slow-to-reject `http`/`socks5` forward proxies — with
+  each tier walked oldest-scraped first, plus `INFINITY_DEAD_RETEST_BUDGET`
   (default 200) already-dead nodes of the refresh's own source, also
-  oldest-scraped first. The pass never drains the whole untested queue in
-  one refresh, so a single flooded feed cannot stall every other source's
-  cadence; probes advance FIFO across refreshes instead — including the dead
-  slice, so slow-failing (timeout) nodes re-test at the same pace as
+  oldest-scraped first. Tiering keeps a flooded feed (gfpcom publishes
+  hundreds of thousands of HTTP proxies) from consuming the budget before the
+  protocols tunnels actually prefer. The pass never drains the whole untested
+  queue in one refresh, so a single flooded feed cannot stall every other
+  source's cadence; each tier (and the dead slice) marches FIFO across
+  refreshes, so slow-failing (timeout) nodes re-test at the same pace as
   fast-refusing ones instead of starving behind them.
 - Every batch verdict is written to the store as soon as it completes, so
   `alive` nodes surface incrementally while a large pass still runs — the pool

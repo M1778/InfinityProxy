@@ -1,4 +1,4 @@
-# ADR-0011: Multi-tenant control center as a separate edge service
+# ADR-0012: Multi-tenant control center as a separate edge service
 
 Status: **accepted**
 

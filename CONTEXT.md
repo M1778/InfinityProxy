@@ -145,7 +145,7 @@ What a client speaks to a tunnel: SOCKS5 and HTTP (CONNECT), authenticated with
 the tunnel's stable credentials.
 
 **Control center**:
-The optional multi-tenant edge service ([ADR-0011](./docs/adr/0011-multi-tenant-control-center.md))
+The optional multi-tenant edge service ([ADR-0012](./docs/adr/0012-multi-tenant-control-center.md))
 on `127.0.0.1:8790` that fronts the Control API for public boards.
 
 **Tenant**:

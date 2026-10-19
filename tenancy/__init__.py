@@ -1,4 +1,4 @@
-"""Multi-tenant control center (ADR-0011): operator keys, credits, leases.
+"""Multi-tenant control center (ADR-0012): operator keys, credits, leases.
 
 A separate Flask service that fronts the engine: tenants register, hold
 credits, and spawn tunnels on the same host — everything local the Control API

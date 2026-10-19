@@ -1,4 +1,4 @@
-"""Flask control center for the multi-tenant deployment (ADR-0011).
+"""Flask control center for the multi-tenant deployment (ADR-0012).
 
 Three key scopes, one per audience:
 - operator `X-Operator-Key` — the tenant API key issued at registration;
@@ -121,7 +121,7 @@ def create_app(
         return {"ip": ip, "connection_id": conn, "key_id": known_clients[entry]}
 
     def tunnels_for_tenant(tenant_id: str) -> list[dict[str, Any]]:
-        """The tenant's leases, projected without credentials (ADR-0011).
+        """The tenant's leases, projected without credentials (ADR-0012).
 
         Scoped by the stored tenant→tunnel mapping — rows the tenant's
         principal provisioned. Tombstones (rows the engine no longer returns)

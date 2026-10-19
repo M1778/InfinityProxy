@@ -137,7 +137,7 @@ cache the result for `INFINITY_HOST_PICK_TTL_S` (default 60s).
 ### The control center (multi-tenant edge)
 
 **Third, opt-in** front for deployments serving other operators
-([ADR-0011](./adr/0011-multi-tenant-control-center.md)): `tenancy/`, run via
+([ADR-0012](./adr/0012-multi-tenant-control-center.md)): `tenancy/`, run via
 `python -m tenancy` on its own loopback listener `127.0.0.1:8790`.
 It keeps its own SQLite store (`tenancy.db` — tenants, ledger, the
 tenant→tunnel mapping) separate from the engine's pool file, and calls the
@@ -154,7 +154,7 @@ no admin surface), and the unauthenticated `/v1/public/*` metrics view.
 Lease ownership is a mapping table, every lease row crossing the API is
 credential-free (`id/host/port/state`), and credits meter wall-clock runtime
 per tenant ledger. Deployment rides compose profile `tenancy`; a default
-stack never starts it. Endpoints and configuration: docs/api.md#control-center-adr-0011.
+stack never starts it. Endpoints and configuration: docs/api.md#control-center-adr-0012.
 
 ### SQLite store
 
@@ -331,8 +331,8 @@ The Engine never queues or blocks a create request on the pool.
   privileged host-control surface (opt-in, see [ADR-0010](./adr/0010-hostagent.md)).
 - Control center: `127.0.0.1:8790` (opt-in, `--profile tenancy`) — the
   multi-tenant edge with its own key scopes and credit metering, calling the
-  engine as a local principal; see [ADR-0011](./adr/0011-multi-tenant-control-center.md)
-  and [docs/api.md](./api.md#control-center-adr-0011).
+  engine as a local principal; see [ADR-0012](./adr/0012-multi-tenant-control-center.md)
+  and [docs/api.md](./api.md#control-center-adr-0012).
 - Mind that your public network is not published to Docker by default (see
   [CONTRIBUTING.md](../CONTRIBUTING.md)).
 - Tunnels: one published port each, from `INFINITY_TUNNEL_RANGE`. Each tunnel
@@ -362,7 +362,7 @@ InfinityProxy/
 │   ├── app.py                #   loopback control API (:8788)
 │   ├── platform.py           #   capabilities, gsettings/KDE proxy setter
 │   └── singbox.py            #   TUN sing-box config renderer
-├── tenancy/                  # multi-tenant control center (ADR-0011)
+├── tenancy/                  # multi-tenant control center (ADR-0012)
 │   ├── app.py                #   key scopes, leases, credits (:8790)
 │   ├── engine.py             #   engine edge + credential-free projections
 │   ├── store.py              #   tenants, ledger, tenant→tunnel mapping
@@ -391,4 +391,5 @@ Relevant architecture decision records:
 - [0008 Throughput-certified pool](./adr/0008-throughput-certified-pool.md)
 - [0009 Stability-scored assignment](./adr/0009-stability-scored-assignment.md)
 - [0010 Host system proxy + TUN via hostagent](./adr/0010-hostagent.md)
-- [0011 Multi-tenant control center](./adr/0011-multi-tenant-control-center.md)
+- [0011 Throughput target + probe Host header](./adr/0011-throughput-target-and-host-header.md)
+- [0012 Multi-tenant control center](./adr/0012-multi-tenant-control-center.md)

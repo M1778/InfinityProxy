@@ -6,9 +6,20 @@ import os
 from dataclasses import dataclass
 
 
-def _env_int(name: str, default: int) -> int:
+def _env_raw(name: str) -> str | None:
+    """Env value, with blank treated as unset (compose forwards `VAR:-` as "")."""
     raw = os.environ.get(name)
+    return raw if raw is not None and raw.strip() else None
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = _env_raw(name)
     return int(raw) if raw is not None else default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = _env_raw(name)
+    return float(raw) if raw is not None else default
 
 
 @dataclass(frozen=True)
@@ -29,9 +40,9 @@ class Settings:
     throughput_min_kb_s: int = 200
     throughput_sample_bytes: int = 1_048_576
     throughput_timeout_s: float = 12.0
-    throughput_host: str = "speedtest.tele2.net"
+    throughput_host: str = "speed.cloudflare.com"
     throughput_port: int = 80
-    throughput_path: str = "/1MB.bin"
+    throughput_path: str = "/__down?bytes=10485760"
     health_interval_s: int = 30
     max_misses: int = 2
     urltest_interval_s: int = 30
@@ -85,14 +96,14 @@ class Settings:
             throughput_sample_bytes=_env_int(
                 "INFINITY_THROUGHPUT_SAMPLE_BYTES", 1048576
             ),
-            throughput_timeout_s=float(
-                os.environ.get("INFINITY_THROUGHPUT_TIMEOUT_S", "12.0")
-            ),
+            throughput_timeout_s=_env_float("INFINITY_THROUGHPUT_TIMEOUT_S", 12.0),
             throughput_host=os.environ.get(
-                "INFINITY_THROUGHPUT_HOST", "speedtest.tele2.net"
+                "INFINITY_THROUGHPUT_HOST", "speed.cloudflare.com"
             ),
             throughput_port=_env_int("INFINITY_THROUGHPUT_PORT", 80),
-            throughput_path=os.environ.get("INFINITY_THROUGHPUT_PATH", "/1MB.bin"),
+            throughput_path=os.environ.get(
+                "INFINITY_THROUGHPUT_PATH", "/__down?bytes=10485760"
+            ),
             health_interval_s=_env_int("INFINITY_HEALTH_INTERVAL_S", 30),
             max_misses=_env_int("INFINITY_MAX_MISSES", 2),
             urltest_interval_s=max(10, _env_int("INFINITY_URTEST_INTERVAL_S", 30)),
@@ -138,9 +149,7 @@ class Settings:
                 "INFINITY_HOST_PICK_TEST_URL", "https://api.ipify.org"
             ),
             host_pick_sample_bytes=_env_int("INFINITY_HOST_PICK_SAMPLE_BYTES", 262144),
-            host_pick_timeout_s=float(
-                os.environ.get("INFINITY_HOST_PICK_TIMEOUT_S", "8.0")
-            ),
+            host_pick_timeout_s=_env_float("INFINITY_HOST_PICK_TIMEOUT_S", 8.0),
         )
 
     @property

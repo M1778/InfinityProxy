@@ -1,4 +1,4 @@
-"""Entrypoint: `python -m tenancy` runs the control center (ADR-0011)."""
+"""Entrypoint: `python -m tenancy` runs the control center (ADR-0012)."""
 
 from __future__ import annotations
 

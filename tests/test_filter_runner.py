@@ -130,7 +130,12 @@ class RefusedPort:
 
 
 class Responder:
-    """Sends fixed bytes on accept, without reading the client's probe."""
+    """Sends fixed bytes on accept, without reading the client's probe first.
+
+    Drains (then closes) after sending: closing with the client's request still
+    unread makes Windows send RST, which can purge the payload before the probe
+    reads it and turn "canned response" into a connection abort.
+    """
 
     def __init__(self, payload: bytes) -> None:
         self.sock = socket.create_server(("127.0.0.1", 0))
@@ -152,6 +157,9 @@ class Responder:
         with conn:
             try:
                 conn.sendall(self._payload)
+                conn.shutdown(socket.SHUT_WR)
+                while conn.recv(4096):
+                    pass
             except OSError:
                 pass
 
@@ -168,6 +176,7 @@ class VlessRelayEmulator:
         self.sock.listen(16)
         self.port = self.sock.getsockname()[1]
         self._payload = payload
+        self.request: bytes | None = None
         self._stop = threading.Event()
         threading.Thread(target=self._serve, daemon=True).start()
 
@@ -185,6 +194,7 @@ class VlessRelayEmulator:
                 data = conn.recv(18)  # version + uuid + addons len (1 byte)
                 if data and data[0] == 0 and len(data) >= 18:
                     conn.recv(5)  # command + port + addr type + host len
+                    self.request = data + _read_until(conn, b"\r\n\r\n")
                     conn.sendall(self._payload)
             except OSError:
                 pass
@@ -208,6 +218,7 @@ class TrojanRelayEmulator:
         )
         self._ctx = ctx
         self._payload = payload
+        self.request: bytes | None = None
         self._stop = threading.Event()
         threading.Thread(target=self._serve, daemon=True).start()
 
@@ -224,6 +235,7 @@ class TrojanRelayEmulator:
             with self._ctx.wrap_socket(conn, server_side=True) as tls:
                 data = tls.recv(2)
                 if data and len(data) >= 2:
+                    self.request = data + _read_until(tls, b"\r\n\r\n")
                     tls.sendall(self._payload)
         except (OSError, ssl.SSLError):
             pass
@@ -445,6 +457,7 @@ class SsRelayEmulator:
         method: str = "chacha20-ietf-poly1305",
         password: str = "probe-secret",
         payload: bytes = _HTTP_200,
+        body_bytes: int = 0,
     ) -> None:
         key_len, salt_len, aead = _SS_AEAD[method]
         self.sock = socket.create_server(("127.0.0.1", 0))
@@ -454,7 +467,9 @@ class SsRelayEmulator:
         self.password = password
         self.key_len, self.salt_len, self._aead = key_len, salt_len, aead
         self._payload = payload
+        self._body_bytes = body_bytes
         self.last_target: tuple[bytes, int] | None = None
+        self.last_request: bytes | None = None
         self._stop = threading.Event()
         threading.Thread(target=self._serve, daemon=True).start()
 
@@ -491,6 +506,7 @@ class SsRelayEmulator:
                 if len(body) < length + 16:
                     return
                 decoded = cipher.decrypt(bytes(nonce), body, None)
+                self.last_request = decoded
                 if decoded[:1] == b"\x03" and len(decoded) >= 3:
                     host_len = decoded[1]
                     fqdn = decoded[2 : 2 + host_len]
@@ -510,7 +526,20 @@ class SsRelayEmulator:
                 )
                 _bump_nonce(nonce)
                 framed += resp.encrypt(bytes(nonce), self._payload, None)
+                _bump_nonce(nonce)
                 conn.sendall(resp_salt + framed)
+                remaining = self._body_bytes
+                while remaining > 0:
+                    chunk_len = min(0x3FFF, remaining)
+                    chunk = b"y" * chunk_len
+                    framed = resp.encrypt(
+                        bytes(nonce), chunk_len.to_bytes(2, "big"), None
+                    )
+                    _bump_nonce(nonce)
+                    framed += resp.encrypt(bytes(nonce), chunk, None)
+                    _bump_nonce(nonce)
+                    conn.sendall(framed)
+                    remaining -= chunk_len
         except InvalidTag:
             pass
         except OSError:
@@ -540,6 +569,7 @@ class HttpRelayEmulator:
         self.port = self.sock.getsockname()[1]
         self._payload = payload
         self.last_target: bytes | None = None
+        self.last_get: bytes | None = None
         self._stop = threading.Event()
         threading.Thread(target=self._serve, daemon=True).start()
 
@@ -559,7 +589,9 @@ class HttpRelayEmulator:
                     return
                 self.last_target = request.split(b"\r\n", 1)[0]
                 conn.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-                if conn.recv(64):  # the GET through the tunnel
+                get = _read_until(conn, b"\r\n\r\n")  # the GET through the tunnel
+                if get:
+                    self.last_get = get
                     conn.sendall(self._payload)
             except OSError:
                 pass
@@ -579,6 +611,7 @@ class Socks5RelayEmulator:
         self._payload = payload
         self._grant = grant or b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00"
         self.last_target: tuple[bytes, int] | None = None
+        self.last_get: bytes | None = None
         self._stop = threading.Event()
         threading.Thread(target=self._serve, daemon=True).start()
 
@@ -608,7 +641,9 @@ class Socks5RelayEmulator:
                     return
                 self.last_target = (host, int.from_bytes(port, "big"))
                 conn.sendall(self._grant)
-                if conn.recv(64):  # the GET through the tunnel
+                get = _read_until(conn, b"\r\n\r\n")  # the GET through the tunnel
+                if get:
+                    self.last_get = get
                     conn.sendall(self._payload)
             except OSError:
                 pass
@@ -945,6 +980,56 @@ def test_probe_ss_alive_on_aead_relay_emulator() -> None:
     assert result.alive is True
     assert result.error is None
     assert server.last_target == (b"www.google.com", 80)
+
+
+def test_probe_ss_throughput_certifies_download() -> None:
+    # Regression for the admission gate over ss: the judge and the body read
+    # run while the relay socket is open, so a streaming ss node certifies with
+    # a throughput number instead of dying on a closed socket.
+    server = SsRelayEmulator(body_bytes=1 << 20)
+    spec = ThroughputSpec(
+        host="127.0.0.1", port=server.port, path="/1MB.bin", sample_bytes=1 << 20
+    )
+    try:
+        result = real_probe(
+            make_ss_node("sstp", server.port),
+            timeout_s=1.0,
+            throughput=spec,
+            throughput_timeout_s=5.0,
+        )
+    finally:
+        server.close()
+    assert result.alive is True
+    assert result.error is None
+    assert result.throughput_kb_s is not None
+    assert result.throughput_kb_s > 0
+
+
+def test_probe_requests_carry_host_header() -> None:
+    # A relayed HTTP/1.0 GET without Host is rejected by virtual-hosted targets
+    # (cachefly: 400), which false-negatives working nodes. Every protocol's
+    # request shape must carry the target's Host header.
+    vless = VlessRelayEmulator()
+    trojan = TrojanRelayEmulator()
+    ss = SsRelayEmulator()
+    http = HttpRelayEmulator()
+    socks5 = Socks5RelayEmulator()
+    cases = [
+        (make_node("hh_vless", vless.port, "vless"), vless, "request"),
+        (make_node("hh_trojan", trojan.port, "trojan"), trojan, "request"),
+        (make_ss_node("hh_ss", ss.port), ss, "last_request"),
+        (make_node("hh_http", http.port, "http"), http, "last_get"),
+        (make_node("hh_socks5", socks5.port, "socks5"), socks5, "last_get"),
+    ]
+    try:
+        for node, server, attr in cases:
+            result = real_probe(node, timeout_s=1.0)
+            assert result.alive is True, (node.protocol, result.error)
+            captured = getattr(server, attr) or b""
+            assert b"Host: www.google.com" in captured, node.protocol
+    finally:
+        for server in (vless, trojan, ss, http, socks5):
+            server.close()
 
 
 def test_probe_ss_alive_aes_256_gcm_flow() -> None:

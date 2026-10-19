@@ -21,6 +21,10 @@ Full relay checks:
 - HTTP/SOCKS5 forward proxies: complete the CONNECT handshake to the target,
   then require the relayed target response to be a 2xx/3xx `HTTP/x.y` line.
 
+Every request the probe relays is a `HTTP/1.0` GET carrying an explicit `Host:`
+header (ADR-0011): a Host-less request is rejected by virtual-hosted targets
+(cachefly: 400) even though the relay itself is working.
+
 The relayed bytes themselves must be a plausible `HTTP/x.y 2xx/3xx` status line
 from the requested target. A peer that answers the CONNECT with its own canned
 HTTP error (a honeypot fronting the target) is rejected even though the wire
@@ -70,8 +74,9 @@ class ThroughputSpec:
     The probe verifies the relay handshake first (the node plus a target digest
     verify it is a real proxy), then reads `sample_bytes` of that target's body
     to measure a usable download rate. The choice of host matters: a target with
-    a large plaintext body (the default is a public file server on port 80) lets
-    a slow node reveal itself even when its handshake passes.
+    a large plaintext body (the default is Cloudflare's speed-test endpoint on
+    port 80, ADR-0011) lets a slow node reveal itself even when its handshake
+    passes.
     """
 
     host: str
@@ -185,7 +190,10 @@ def probe(
     throughput: ThroughputSpec | None = None,
     throughput_timeout_s: float = 12.0,
 ) -> ProbeResult:
-    started = time.monotonic()
+    # perf_counter, not monotonic: Windows' monotonic clock only advances with
+    # the ~15.6 ms system tick, which buckets latency to 0/16/31 ms there.
+    # Every deadline in this module is built and consumed on the same clock.
+    started = time.perf_counter()
     deadline = started + timeout_s
     try:
         if not probeable(node):
@@ -238,6 +246,10 @@ def probe(
 # -- v2: per-protocol relay handshakes ----------------------------------------
 
 
+def _probe_request(path: str, host: bytes) -> bytes:
+    return f"GET {path} HTTP/1.0\r\n".encode("ascii") + b"Host: " + host + b"\r\n\r\n"
+
+
 def _attempt_relay(
     node: Node,
     deadline: float,
@@ -249,8 +261,8 @@ def _attempt_relay(
     host = throughput.host.encode("ascii") if throughput else _PATH_TARGET
     port = throughput.port if throughput else _TARGET_PORT
     path = throughput.path if throughput else "/"
-    sent = _challenge_for(node.protocol, conf, node, host, port) + (
-        f"GET {path} HTTP/1.0\r\n\r\n".encode("ascii")
+    sent = _challenge_for(node.protocol, conf, node, host, port) + _probe_request(
+        path, host
     )
     with raw:
         raw.settimeout(_remaining(deadline))
@@ -368,7 +380,7 @@ def _measure_body(
     certified as fast. Reads cap at `sample_bytes` / `timeout_s` so a slow node
     measurably scores low instead of hanging the batch.
     """
-    start = time.monotonic()
+    start = time.perf_counter()
     deadline = start + timeout_s
     conn.settimeout(_remaining(deadline))
     received = 0
@@ -380,8 +392,11 @@ def _measure_body(
         if not chunk:
             break
         received += len(chunk)
-    elapsed = time.monotonic() - start
-    if received == 0 or elapsed <= 0:
+    # A zero elapsed time cannot happen with perf_counter; the floor is only
+    # divide-by-zero insurance. `monotonic` here used to collapse sub-tick
+    # reads to elapsed == 0 and throw a valid measurement away on Windows.
+    elapsed = max(time.perf_counter() - start, 1e-6)
+    if received == 0:
         return None
     return max(0, round(received / 1024 / elapsed))
 
@@ -557,9 +572,7 @@ def _attempt_ss_relay(
         raw.settimeout(_remaining(deadline))
         salt = os.urandom(spec.salt_len)
         client = spec.aead(_ss_subkey(master, salt, spec.key_len))
-        payload = _ss_addr_header(host, port) + (
-            f"GET {path} HTTP/1.0\r\n\r\n".encode("ascii")
-        )
+        payload = _ss_addr_header(host, port) + _probe_request(path, host)
         nonce = bytearray(spec.nonce_len)
         framed = client.encrypt(bytes(nonce), len(payload).to_bytes(2, "big"), None)
         _ss_inc_nonce(nonce)
@@ -599,28 +612,32 @@ def _attempt_ss_relay(
                 ("decrypt failed (wrong credentials or non-relay responder)"),
                 None,
             )
-    if payload.startswith(relayed):
-        return (
-            False,
-            ("server relayed our request bytes back (echo, non-relay responder)"),
-            None,
-        )
-    if not _is_successful_http(relayed):
-        status = _http_status(relayed)
-        return (
-            False,
-            (
-                f"peer answered {relayed[:24]!r} (status {status or 'unknown'}), not "
-                "a relayed 2xx/3xx response from the target (canned-response honeypot)"
-            ),
-            None,
-        )
-    if throughput is not None:
-        kb_s = _ss_body_kb(
-            raw, server, nonce, throughput.sample_bytes, throughput_timeout_s
-        )
-        return True, None, kb_s
-    return True, None, None
+        if payload.startswith(relayed):
+            return (
+                False,
+                ("server relayed our request bytes back (echo, non-relay responder)"),
+                None,
+            )
+        if not _is_successful_http(relayed):
+            status = _http_status(relayed)
+            return (
+                False,
+                (
+                    f"peer answered {relayed[:24]!r} (status {status or 'unknown'}), "
+                    "not a relayed 2xx/3xx response from the target "
+                    "(canned-response honeypot)"
+                ),
+                None,
+            )
+        if throughput is not None:
+            # The judge consumed the first chunk; `_ss_body_kb` keeps reading
+            # AEAD chunks from the same socket, so it must run before `raw`
+            # closes (outside the `with` the socket is already dead).
+            kb_s = _ss_body_kb(
+                raw, server, nonce, throughput.sample_bytes, throughput_timeout_s
+            )
+            return True, None, kb_s
+        return True, None, None
 
 
 def _ss_body_kb(
@@ -637,11 +654,11 @@ def _ss_body_kb(
     with the nonce counter advanced after every AEAD op. Reads cap at
     `sample_bytes` / `timeout_s` like `_measure_body`.
     """
-    start = time.monotonic()
+    start = time.perf_counter()
     deadline = start + timeout_s
     raw.settimeout(_remaining(deadline))
     received = 0
-    while received < sample_bytes and time.monotonic() < deadline:
+    while received < sample_bytes and time.perf_counter() < deadline:
         try:
             head = _recvn(raw, 2 + _SS_TAG_LEN, deadline)
         except socket.timeout:
@@ -660,8 +677,8 @@ def _ss_body_kb(
             _ss_inc_nonce(nonce)
         except InvalidTag:
             break
-    elapsed = time.monotonic() - start
-    if received == 0 or elapsed <= 0:
+    elapsed = max(time.perf_counter() - start, 1e-6)
+    if received == 0:
         return None
     return max(0, round(received / 1024 / elapsed))
 
@@ -709,7 +726,7 @@ def _attempt_forward(
             alive, error = _http_connect_setup(raw, node, host, port, deadline)
             if not alive:
                 return False, error, None
-        sent = f"GET {path} HTTP/1.0\r\n\r\n".encode("ascii")
+        sent = _probe_request(path, host)
         raw.sendall(sent)
         relayed = _recvn(raw, 16, deadline)
         if sent.startswith(relayed):
@@ -774,11 +791,11 @@ def _read_until(conn: socket.socket, sentinel: bytes, deadline: float) -> bytes:
 
 
 def _remaining(deadline: float) -> float:
-    return max(0.001, deadline - time.monotonic())
+    return max(0.001, deadline - time.perf_counter())
 
 
 def _latency_ms(started: float) -> int:
-    return round((time.monotonic() - started) * 1000)
+    return round((time.perf_counter() - started) * 1000)
 
 
 def _first(q: dict[str, list[str]], key: str) -> str | None:

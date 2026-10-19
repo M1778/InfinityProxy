@@ -1,4 +1,4 @@
-"""SQLite store for the control center (ADR-0011): tenants, credits, ledger.
+"""SQLite store for the control center (ADR-0012): tenants, credits, ledger.
 
 Separate database file from the engine pool (`tenancy.db`): the engine's
 row shape stays untouched and a control center can be dropped without

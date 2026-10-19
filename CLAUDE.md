@@ -24,7 +24,7 @@ change must update the docs/ADRs in the same change.
 | `docs/api.md` | Control API endpoints, payloads, errors, env config table |
 | `docs/scraping.md` | Source manifest, fetch loop, dedup, liveness filter, attribution |
 | `docs/dashboard.md` | Panel architecture: SSE, charts, port layout |
-| `docs/adr/` | 11 accepted decisions (0001–0011: per-tunnel containers, SQLite, localhost API, MIT+attribution, urltest rotation, relay-grade liveness, web panel, throughput-certified pool, stability-scored assignment, hostagent, multi-tenant control center) |
+| `docs/adr/` | 12 accepted decisions (0001–0012: per-tunnel containers, SQLite, localhost API, MIT+attribution, urltest rotation, relay-grade liveness, web panel, throughput-certified pool, stability-scored assignment, hostagent, throughput target/Host header, multi-tenant control center) |
 | `docs/benchmark.md` | Real-stack benchmark harness results: first 10-minute run findings |
 | `ROADMAP.md` | v1 surface + post-v1 ambitions and stated no's |
 | `CONTRIBUTING.md` | Build, test, CI, and contribution conventions |
@@ -39,15 +39,21 @@ Never call a tunnel a "proxy server" or a node a "server". Full rules in
 ## Key facts to not re-derive
 
 - Control API: `127.0.0.1:8787`, unauthenticated by design, localhost-only
-  (ADR-0003). Panel: `127.0.0.1:8000`, same semantics (ADR-0007). Don't document
-  or build remote exposure for either.
+  (ADR-0003). Panel: `127.0.0.1:8000`, same semantics (ADR-0007). Control
+  center for multi-tenant boards: `127.0.0.1:8790`, compose profile `tenancy`
+  (ADR-0012) — it fronts the engine with `X-Operator-Key`/`X-Admin-Key` auth,
+  tunnel-scoped leases, and credit metering; the engine surface itself gains
+  nothing. Don't document or build remote exposure for either control surface.
 - Tunnel ports: `10000–59999` from `INFINITY_TUNNEL_RANGE`; credentials stable
   per tunnel, never change on renew.
 - Liveness: protocol handshake, batch 50, 4s timeout; per-tunnel health check
   every 30s, swap after 2 misses. Admission since ADR-0008 additionally
   measures a download through each fresh node (`INFINITY_THROUGHPUT_*`, default
-  floor 200 KiB/s from a 1 MiB sample, 12s cap) and gates the pool on it;
-  health checks stay handshake-only. Health also self-heals down containers
+  floor 200 KiB/s from a 1 MiB sample of `speed.cloudflare.com`, 12s cap,
+  ADR-0011) and gates the pool on it; fresh nodes are probed in protocol-tier
+  order (vless/trojan/ss, then unprobeable, then http/socks5) so a flooded feed
+  cannot starve the tunnel-preferred protocols; health checks stay
+  handshake-only. Health also self-heals down containers
   (`restarts_24h`). Since ADR-0009 the engine accumulates every verdict (admission,
   health, working-set) into windowed `probe_ok`/`probe_total` counters and, when
   `INFINITY_STABILITY_ENABLED` (on by default in `from_env`, off in `Settings()`),

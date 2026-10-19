@@ -1,4 +1,4 @@
-"""Control center tests (ADR-0011): fake engine edge, temp store, no network."""
+"""Control center tests (ADR-0012): fake engine edge, temp store, no network."""
 
 from __future__ import annotations
 

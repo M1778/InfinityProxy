@@ -35,7 +35,7 @@ interview, and stated no's. Unstated ideas are deliberately not here.
   **Host** view exposes both toggles with a per-tunnel target selector and
   re-measure; hostagent JSON contract is OS-agnostic so a native/Windows agent
   can implement it later.
-- Multi-tenant control center ([ADR-0011](./docs/adr/0011-multi-tenant-control-center.md)):
+- Multi-tenant control center ([ADR-0012](./docs/adr/0012-multi-tenant-control-center.md)):
   an opt-in `tenancy` service (compose profile `tenancy`, port 8790) fronting
   the engine for public boards — tenant registration with operator keys
   (`X-Operator-Key`), tunnel-scoped leases (credential-free rows), credit
@@ -61,7 +61,7 @@ during filtering. This sharpens the **geo/diversity** rotation axis into an
 explicit requirement rather than an emergent property.
 
 ### Tunnel-scoped API keys
-**Shipped** as the control center ([ADR-0011](docs/adr/0011-multi-tenant-control-center.md)):
+**Shipped** as the control center ([ADR-0012](docs/adr/0012-multi-tenant-control-center.md)):
 a separate opt-in service (`tenancy`, port 8790) with per-tenant operator
 keys, tunnel-scoped leases, credit metering, and an admin surface. The engine
 Control API itself stays unauthenticated localhost (ADR-0003) — the

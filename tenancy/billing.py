@@ -1,4 +1,4 @@
-"""Credit metering (ADR-0011): walls-clock billing against tenant credits."""
+"""Credit metering (ADR-0012): walls-clock billing against tenant credits."""
 
 from __future__ import annotations
 
