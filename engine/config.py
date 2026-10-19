@@ -24,6 +24,7 @@ class Settings:
     batch_size: int = 50
     probe_timeout_ms: int = 4000
     probe_budget_per_refresh: int = 5000
+    dead_retest_budget: int = 200
     throughput_enabled: bool = True
     throughput_min_kb_s: int = 200
     throughput_sample_bytes: int = 1_048_576
@@ -117,6 +118,7 @@ class Settings:
             probe_budget_per_refresh=_env_int(
                 "INFINITY_PROBE_BUDGET_PER_REFRESH", 5000
             ),
+            dead_retest_budget=_env_int("INFINITY_DEAD_RETEST_BUDGET", 200),
             db_path=os.environ.get("INFINITY_DB", "infinity.db"),
             singbox_image=os.environ.get(
                 "INFINITY_SINGBOX_IMAGE", "ghcr.io/sagernet/sing-box:v1.11.6"

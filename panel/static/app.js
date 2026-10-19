@@ -14,6 +14,7 @@ const state = {
   nodes: null,          // last /api/nodes result
   host: null,           // last /api/host result
   hostError: null,
+  nodeSort: null,       // "latency" | "throughput" | null (score default)
   lastSnapAt: 0,
   panels: { pool: null, tunnel: null, proto: null, donut: null },
 };
@@ -419,6 +420,11 @@ async function testTunnel(id) {
 
 /* ---------- nodes view ---------- */
 
+function toggleNodeSort(sort) {
+  state.nodeSort = state.nodeSort === sort ? null : sort;
+  loadNodes();
+}
+
 async function loadNodes() {
   const params = new URLSearchParams();
   const state_ = $("#f-state").value; if (state_) params.set("state", state_);
@@ -428,6 +434,7 @@ async function loadNodes() {
   const q = $("#f-q").value.trim(); if (q) params.set("q", q);
   const limit = parseInt($("#f-limit").value, 10);
   params.set("limit", Number.isFinite(limit) && limit >= 1 && limit <= 1000 ? limit : 200);
+  if (state.nodeSort) params.set("sort", state.nodeSort);
   try {
     const res = await api("/api/nodes?" + params.toString());
     state.nodes = res;
@@ -437,6 +444,13 @@ async function loadNodes() {
 
 function renderNodes() {
   if (!state.nodes) return;
+  const latencyTh = $("#th-latency");
+  const throughputTh = $("#th-throughput");
+  latencyTh.textContent = state.nodeSort === "latency" ? "latency ▲" : "latency";
+  throughputTh.textContent =
+    state.nodeSort === "throughput" ? "throughput ▼" : "throughput";
+  latencyTh.classList.toggle("sorted", state.nodeSort === "latency");
+  throughputTh.classList.toggle("sorted", state.nodeSort === "throughput");
   const rows = state.nodes.nodes || [];
   $("#node-count").textContent = `${rows.length} node${rows.length === 1 ? "" : "s"} shown (limit ${state.nodes.limit}) — click a row for the raw URI.`;
   $("#node-table tbody").innerHTML = rows.map((n) => `<tr class="row-click" data-id="${esc(n.id)}">
@@ -667,6 +681,10 @@ async function init() {
   });
   $("#create-form").addEventListener("submit", createTunnel);
   $("#node-filter").addEventListener("submit", (e) => { e.preventDefault(); loadNodes(); });
+  // Server-side ping/downlink sorting: clicking latency/throughput re-queries
+  // /api/nodes with sort=...; clicking the active column clears back to score.
+  $("#th-latency").addEventListener("click", () => toggleNodeSort("latency"));
+  $("#th-throughput").addEventListener("click", () => toggleNodeSort("throughput"));
   $("#modal-close").addEventListener("click", hideModal);
   $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") hideModal(); });
 

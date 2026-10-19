@@ -293,6 +293,7 @@ input[type="search"] { width: 14rem; }
   text-transform: uppercase;
   letter-spacing: .08em;
 }
+.data-table th.sorted { color: var(--accent); cursor: pointer; }
 .data-table tbody tr:last-child td { border-bottom: none; }
 .data-table tbody tr.row-click { cursor: pointer; }
 .data-table tbody tr.row-click:hover { background: #f2f6fd; }
