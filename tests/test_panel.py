@@ -443,6 +443,41 @@ def test_poll_guard_skips_overlapping_crawl():
     assert status_calls["n"] == 1
 
 
+def test_idle_panel_poll_skips_engine_calls(monkeypatch):
+    """With no SSE watcher the poll loop must not query the engine at all."""
+    calls = []
+
+    class MonitoringEngine(EngineClient):
+        def __init__(self) -> None:
+            super().__init__("http://127.0.0.1:1")
+
+        def status(self):  # type: ignore[override]
+            calls.append("status")
+            return dict(FAKE_STATUS)
+
+        def tunnels(self):  # type: ignore[override]
+            calls.append("tunnels")
+            return {"tunnels": [dict(FAKE_TUNNEL)]}
+
+    app = create_app(
+        settings=PanelSettings(poll_interval_s=0.05),
+        engine=MonitoringEngine(),
+        poll=True,
+    )
+    app.config["TESTING"] = True
+    test = app.test_client()
+    import time as _time
+
+    _time.sleep(0.3)
+    assert calls == []  # still idle: nothing open
+
+    resp = test.get("/api/events", buffered=False)
+    next(iter(resp.response))
+    _time.sleep(0.3)
+    assert "status" in calls  # watcher opened: crawl fired
+    resp.close()
+
+
 def test_history_trims_oldest_beyond_window():
     hist = SnapshotHistory(window_s=10, max_samples=100)
     for i in range(15):

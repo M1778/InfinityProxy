@@ -46,7 +46,11 @@ browser ── SSE ──► panel:8000 (Flask)
 - Zero-build frontend: `panel/static/{index.html,app.css,app.js,vendor/chart.umd.js}`
   (Chart.js UMD vendored once). Vanilla JS, no framework, no node toolchain.
 - SSE heartbeats every 15s; client reconnects with backoff; graceful degradation
-  to a 5s `fetch` poll when the stream drops.
+  to a 5s `fetch` poll when the stream drops. The crawl thread itself only
+  calls the engine while at least one SSE watcher is connected — an idle panel
+  imposes zero per-5s load on the engine — and a crawl exception is logged and
+  retried on the next tick instead of killing the thread (whose death would
+  silently freeze every watcher's dashboard at a stale state).
 - "Test tunnel" button: the panel dials `https://api.ipify.org` *through* the
   tunnel (CONNECT) and reports the exit IP + latency — the only feature that
   needs panel-originated outbound traffic (env `INFINITY_PANEL_TEST_URL`).

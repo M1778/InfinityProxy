@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from typing import Any, Callable
@@ -14,6 +15,8 @@ from panel.config import PanelSettings
 from panel.history import SnapshotHistory
 
 DEFAULT_POLL_S = 5
+
+logger = logging.getLogger("infinity.panel")
 
 
 def _metrics_from(status: dict[str, Any]) -> dict[str, float]:
@@ -76,6 +79,7 @@ def create_app(
     }
     cond = threading.Condition()
     crawl_lock = threading.Lock()
+    sse_watchers = 0
 
     def crawl_once() -> None:
         if not crawl_lock.acquire(blocking=False):
@@ -103,9 +107,27 @@ def create_app(
         finally:
             crawl_lock.release()
 
+    def sse_watcher_entered() -> None:
+        nonlocal sse_watchers
+        with cond:
+            sse_watchers += 1
+
+    def sse_watcher_exited() -> None:
+        nonlocal sse_watchers
+        with cond:
+            sse_watchers -= 1
+
     def poll_forever() -> None:
         while True:
-            crawl_once()
+            # The crawl thread must never die: one unexpected exception here
+            # silently freezes every SSE watcher's dashboard at a stale state.
+            # An idle panel (no SSE watchers) has nobody to show the metrics
+            # to, so the two engine calls only fire while someone is watching.
+            try:
+                if sse_watchers > 0:
+                    crawl_once()
+            except Exception:  # noqa: BLE001
+                logger.exception("panel status crawl failed")
             time.sleep(settings.poll_interval_s)
 
     if poll:
@@ -173,25 +195,35 @@ def create_app(
     @app.get("/api/events")
     def api_events():
         def stream():
-            last_seq = -1
-            last_beat = time.monotonic()
-            while True:
-                snap = None
-                with cond:
-                    if state["seq"] != last_seq:
-                        last_seq = state["seq"]
-                        snap = {
-                            k: state[k]
-                            for k in ("t", "status", "tunnels", "reachable", "error")
-                        }
-                if snap is not None:
-                    last_beat = time.monotonic()
-                    yield f"event: snapshot\ndata: {json.dumps(snap)}\n\n"
-                elif time.monotonic() - last_beat >= settings.sse_heartbeat_s:
-                    last_beat = time.monotonic()
-                    yield "event: heartbeat\ndata: ping\n\n"
-                else:
-                    time.sleep(0.2)
+            sse_watcher_entered()
+            try:
+                last_seq = -1
+                last_beat = time.monotonic()
+                while True:
+                    snap = None
+                    with cond:
+                        if state["seq"] != last_seq:
+                            last_seq = state["seq"]
+                            snap = {
+                                k: state[k]
+                                for k in (
+                                    "t",
+                                    "status",
+                                    "tunnels",
+                                    "reachable",
+                                    "error",
+                                )
+                            }
+                    if snap is not None:
+                        last_beat = time.monotonic()
+                        yield f"event: snapshot\ndata: {json.dumps(snap)}\n\n"
+                    elif time.monotonic() - last_beat >= settings.sse_heartbeat_s:
+                        last_beat = time.monotonic()
+                        yield "event: heartbeat\ndata: ping\n\n"
+                    else:
+                        time.sleep(0.2)
+            finally:
+                sse_watcher_exited()
 
         return Response(
             stream(),
