@@ -47,6 +47,7 @@ import os
 import re
 import socket
 import ssl
+import threading
 import time
 import uuid
 from urllib.parse import parse_qs, unquote, urlparse
@@ -82,6 +83,56 @@ class ThroughputSpec:
     port: int
     path: str
     sample_bytes: int
+
+
+_DIAL_MEMO_TTL_S = 30.0
+_DIAL_MEMO_MAX = 4096
+# (host, port) -> timestamp of the last refused/closed dial. A TCP-level
+# connection failure is endpoint state, not URI state: every probeable
+# protocol for the same endpoint shares it, and feeds routinely list the same
+# dead endpoint under vless/ss/trojan. The memo absents it for 30s so a batch
+# of 50 stops re-paying ~4s dials against refuses. Failures only — an open
+# listener (TLS alert, protocol error) stays fully probed since liveness there
+# depends on the URI. Entries cap so a hostile feed of unique dead endpoints
+# cannot grow the dict without bound; one vanished flurry can always wait out
+# the 30s TTL.
+_dial_fails: dict[tuple[str, int], float] = {}
+_dial_lock = threading.Lock()
+
+
+def _dial(node: Node, deadline: float) -> socket.socket:
+    """`socket.create_connection` with a short-circuit memo of recent refusals."""
+    key = (node.server, node.port)
+    now = time.monotonic()
+    with _dial_lock:
+        failed_at = _dial_fails.get(key)
+        if failed_at is not None:
+            if failed_at >= now - _DIAL_MEMO_TTL_S:
+                raise ConnectionRefusedError(
+                    "endpoint refused a dial within the last 30s (memoized)"
+                )
+            del _dial_fails[key]
+    try:
+        conn = socket.create_connection(
+            (node.server, node.port), timeout=_remaining(deadline)
+        )
+    except OSError:
+        with _dial_lock:
+            if len(_dial_fails) >= _DIAL_MEMO_MAX:
+                for stale in [
+                    k for k, v in _dial_fails.items() if v < now - _DIAL_MEMO_TTL_S
+                ]:
+                    del _dial_fails[stale]
+            if len(_dial_fails) >= _DIAL_MEMO_MAX:
+                _dial_fails.pop(next(iter(_dial_fails)), None)
+            _dial_fails[key] = now
+        raise
+    return conn
+
+
+def _clear_dial_memo_for_tests() -> None:
+    with _dial_lock:
+        _dial_fails.clear()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -206,9 +257,7 @@ def _attempt_relay(
     throughput_timeout_s: float,
 ) -> tuple[bool, str | None, int | None]:
     conf = _relay_config(node)
-    raw = socket.create_connection(
-        (node.server, node.port), timeout=_remaining(deadline)
-    )
+    raw = _dial(node, deadline)
     host = throughput.host.encode("ascii") if throughput else _PATH_TARGET
     port = throughput.port if throughput else _TARGET_PORT
     path = throughput.path if throughput else "/"
@@ -224,27 +273,29 @@ def _attempt_relay(
             with ctx.wrap_socket(raw, server_hostname=conf.sni or node.server) as tls:
                 tls.settimeout(_remaining(deadline))
                 tls.sendall(sent)
-                alive, error = _judge(node, tls, sent)
+                alive, error = _judge(node, tls, sent, deadline)
                 if alive and throughput is not None:
                     kb_s = _measure_body(tls, throughput, throughput_timeout_s)
                     return alive, error, kb_s
                 return alive, error, None
         raw.sendall(sent)
-        alive, error = _judge(node, raw, sent)
+        alive, error = _judge(node, raw, sent, deadline)
         if alive and throughput is not None:
             kb_s = _measure_body(raw, throughput, throughput_timeout_s)
             return alive, error, kb_s
         return alive, error, None
 
 
-def _judge(node: Node, conn: socket.socket, sent: bytes) -> tuple[bool, str | None]:
-    reply = _recvn(conn, 2)
+def _judge(
+    node: Node, conn: socket.socket, sent: bytes, deadline: float
+) -> tuple[bool, str | None]:
+    reply = _recvn(conn, 2, deadline)
     if node.protocol == "vless" and reply != b"\x00\x00":
         return False, (
             f"expected vless reply b'\\x00\\x00', got {reply[:2]!r} "
             "(non-relay responder)"
         )
-    got = reply + _recvn(conn, 14)
+    got = reply + _recvn(conn, 14, deadline)
     if node.protocol == "trojan" and not got:
         return False, "closed before any relayed bytes (non-relay responder)"
     if sent.startswith(got):
@@ -513,9 +564,7 @@ def _attempt_ss_relay(
     method, password, _plugin = _ss_params(node)
     spec = _SS_AEAD_SPECS[method]  # probeable() already gated the method
     master = _ss_master_key(password.encode("utf-8"), spec.key_len)
-    raw = socket.create_connection(
-        (node.server, node.port), timeout=_remaining(deadline)
-    )
+    raw = _dial(node, deadline)
     host = throughput.host.encode("ascii") if throughput else _PATH_TARGET
     port = throughput.port if throughput else _TARGET_PORT
     path = throughput.path if throughput else "/"
@@ -530,7 +579,7 @@ def _attempt_ss_relay(
         framed += client.encrypt(bytes(nonce), payload, None)
         raw.sendall(salt + framed)
 
-        server_salt = _recvn(raw, spec.salt_len)
+        server_salt = _recvn(raw, spec.salt_len, deadline)
         if len(server_salt) < spec.salt_len:
             return (
                 False,
@@ -541,7 +590,7 @@ def _attempt_ss_relay(
         server = spec.aead(_ss_subkey(master, server_salt, spec.key_len))
         nonce = bytearray(spec.nonce_len)
         try:
-            head = _recvn(raw, 2 + _SS_TAG_LEN)
+            head = _recvn(raw, 2 + _SS_TAG_LEN, deadline)
             if len(head) < 2 + _SS_TAG_LEN:
                 return (
                     False,
@@ -552,7 +601,7 @@ def _attempt_ss_relay(
             _ss_inc_nonce(nonce)
             if length == 0 or length > _SS_MAX_PACKET_SIZE:
                 return False, f"peer chunk length {length} out of range", None
-            body = _recvn(raw, length + _SS_TAG_LEN)
+            body = _recvn(raw, length + _SS_TAG_LEN, deadline)
             if len(body) < length + _SS_TAG_LEN:
                 return False, "peer closed mid-chunk (non-relay responder)", None
             relayed = server.decrypt(bytes(nonce), body, None)
@@ -611,7 +660,7 @@ def _ss_body_kb(
     received = 0
     while received < sample_bytes and time.perf_counter() < deadline:
         try:
-            head = _recvn(raw, 2 + _SS_TAG_LEN)
+            head = _recvn(raw, 2 + _SS_TAG_LEN, deadline)
         except socket.timeout:
             break
         if len(head) < 2 + _SS_TAG_LEN:
@@ -621,7 +670,7 @@ def _ss_body_kb(
             _ss_inc_nonce(nonce)
             if length == 0 or length > _SS_MAX_PACKET_SIZE:
                 break
-            chunk = _recvn(raw, length + _SS_TAG_LEN)
+            chunk = _recvn(raw, length + _SS_TAG_LEN, deadline)
             if len(chunk) < length + _SS_TAG_LEN:
                 break
             received += len(server.decrypt(bytes(nonce), chunk, None))
@@ -634,9 +683,19 @@ def _ss_body_kb(
     return max(0, round(received / 1024 / elapsed))
 
 
-def _recvn(sock: socket.socket, n: int) -> bytes:
+def _recvn(sock: socket.socket, n: int, deadline: float) -> bytes:
+    """Receive exactly n bytes (or fewer on close) against an absolute deadline.
+
+    `socket.settimeout` is per operation: a peer that dribbles one byte per
+    window re-arms the timeout forever and turns a 4s handshake into N×4s. Each
+    recv here re-sets the timeout to what is actually left, so the handshake
+    endures at most `deadline` no matter how the bytes arrive. On expiry it
+    raises TimeoutError, which `probe` reports as a plain "timeout" dead
+    verdict.
+    """
     total = bytearray()
     while len(total) < n:
+        sock.settimeout(_remaining(deadline))
         chunk = sock.recv(n - len(total))
         if not chunk:
             return bytes(total)
@@ -653,25 +712,23 @@ def _attempt_forward(
     throughput: ThroughputSpec | None,
     throughput_timeout_s: float,
 ) -> tuple[bool, str | None, int | None]:
-    raw = socket.create_connection(
-        (node.server, node.port), timeout=_remaining(deadline)
-    )
+    raw = _dial(node, deadline)
     host = throughput.host.encode("ascii") if throughput else _PATH_TARGET
     port = throughput.port if throughput else _TARGET_PORT
     path = throughput.path if throughput else "/"
     with raw:
         raw.settimeout(_remaining(deadline))
         if node.protocol == "socks5":
-            alive, error = _socks5_setup(raw, node, host, port)
+            alive, error = _socks5_setup(raw, node, host, port, deadline)
             if not alive:
                 return False, error, None
         else:
-            alive, error = _http_connect_setup(raw, node, host, port)
+            alive, error = _http_connect_setup(raw, node, host, port, deadline)
             if not alive:
                 return False, error, None
         sent = _probe_request(path, host)
         raw.sendall(sent)
-        relayed = _recvn(raw, 16)
+        relayed = _recvn(raw, 16, deadline)
         if sent.startswith(relayed):
             return (
                 False,
@@ -696,11 +753,11 @@ def _attempt_forward(
 
 
 def _http_connect_setup(
-    raw: socket.socket, node: Node, host: bytes, port: int
+    raw: socket.socket, node: Node, host: bytes, port: int, deadline: float
 ) -> tuple[bool, str | None]:
     target = host + b":" + str(port).encode("ascii")
     raw.sendall(b"CONNECT " + target + b" HTTP/1.1\r\nHost: " + target + b"\r\n\r\n")
-    resp = _read_until(raw, b"\r\n\r\n")
+    resp = _read_until(raw, b"\r\n\r\n", deadline)
     status = _http_status(resp)
     if status is None or not 200 <= status < 400:
         return False, f"http proxy rejected CONNECT with {resp[:40]!r}"
@@ -708,23 +765,24 @@ def _http_connect_setup(
 
 
 def _socks5_setup(
-    raw: socket.socket, node: Node, host: bytes, port: int
+    raw: socket.socket, node: Node, host: bytes, port: int, deadline: float
 ) -> tuple[bool, str | None]:
     raw.sendall(b"\x05\x01\x00")
-    reply = _recvn(raw, 2)
+    reply = _recvn(raw, 2, deadline)
     if reply != b"\x05\x00":
         return False, f"expected socks5 method selection b'\\x05\\x00', got {reply!r}"
     connect = b"\x05\x01\x00\x03" + bytes([len(host)]) + host + port.to_bytes(2, "big")
     raw.sendall(connect)
-    grant = _recvn(raw, 10)
+    grant = _recvn(raw, 10, deadline)
     if grant[:2] != b"\x05\x00":
         return False, f"expected socks5 CONNECT grant, got {grant[:12]!r}"
     return True, None
 
 
-def _read_until(conn: socket.socket, sentinel: bytes) -> bytes:
+def _read_until(conn: socket.socket, sentinel: bytes, deadline: float) -> bytes:
     buf = bytearray()
     while not buf.endswith(sentinel):
+        conn.settimeout(_remaining(deadline))
         chunk = conn.recv(256)
         if not chunk:
             break

@@ -168,8 +168,17 @@ def _probe_new(store: Store, settings: Settings, source: SourceManifest) -> None
                 oldest_first=True,
             )
         )
-    dead = store.load_nodes(state="dead", source=source.name)
-    nodes = untested + dead[: settings.batch_size]
+    # The dead retest advances FIFO too: ordering by last latency would pin the
+    # slice on fast-failing nodes forever, so a node whose failure was slow (or
+    # that recovered upstream) would never rotate back into the sample. Alive
+    # or re-dead rows leave the set, so each refresh keeps marching through it.
+    dead = store.load_nodes(
+        state="dead",
+        source=source.name,
+        limit=settings.dead_retest_budget,
+        oldest_first=True,
+    )
+    nodes = untested + dead
     if not nodes:
         return
     batch_probe(
@@ -180,13 +189,3 @@ def _probe_new(store: Store, settings: Settings, source: SourceManifest) -> None
         throughput_timeout_s=settings.throughput_timeout_s,
         on_batch=lambda batch: _admit_batch(store, batch, settings),
     )
-
-
-def refresh_all_due(store: Store, settings: Settings) -> None:
-    """Run every source whose cadence has lapsed. Serial, so fetches stay staggered."""
-    now = time.time()
-    by_name = {s["name"]: s for s in store.sources_summary()}
-    for source in SOURCES:
-        last = by_name.get(source.name, {}).get("last_fetch_s")
-        if last is None or now - float(last) >= source.cadence_s:
-            refresh_source(store, settings, source)

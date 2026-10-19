@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
+import json
 import logging
+import time
 from typing import Any
 
 from flask import Flask, jsonify, redirect, request
@@ -88,9 +91,28 @@ def create_app(
             return err(exc.code, exc.message, exc.status)
         return jsonify(result)
 
+    # /status is the panel's 5s poll and the bench's 15s poll, but each call
+    # now costs a handful of SQL COUNTs (assignable, pool, protocol split) on
+    # a hot connection. Cache it for a short TTL and let clients turn repeat
+    # polls into 304s with the returned ETag.
+    _status_cache: dict[str, Any] = {"body": None, "etag": None, "at": 0.0}
+    _STATUS_TTL_S = 1.0
+
     @app.get("/status")
     def status():
-        return jsonify(engine.engine_status())
+        now = time.monotonic()
+        cached = _status_cache["body"]
+        if cached is None or now - _status_cache["at"] >= _STATUS_TTL_S:
+            cached = engine.engine_status()
+            etag = hashlib.sha1(
+                json.dumps(cached, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()[:16]
+            _status_cache.update(body=cached, etag=f'W/"{etag}"', at=now)
+        if request.headers.get("If-None-Match") == _status_cache["etag"]:
+            return "", 304
+        response = jsonify(cached)
+        response.headers["ETag"] = _status_cache["etag"]
+        return response
 
     @app.get("/nodes")
     def list_nodes():
@@ -115,9 +137,14 @@ def create_app(
         min_tier_raw = request.args.get("min_tier")
         if min_tier_raw is not None and min_tier_raw not in ("A", "B"):
             return err("invalid_request", "min_tier must be A or B", 400)
-        want_score = sort == "score" or (
-            sort is None and state == "alive" and settings.stability_enabled
-        )
+        if sort in ("latency", "throughput"):
+            order_by = sort
+            want_score = False
+        else:
+            order_by = None
+            want_score = sort == "score" or (
+                sort is None and state == "alive" and settings.stability_enabled
+            )
         if sort == "score" and not settings.stability_enabled:
             return err(
                 "invalid_request",
@@ -138,6 +165,7 @@ def create_app(
             query=query or None,
             in_use=in_use,
             order_by_score=want_score,
+            order_by=order_by,
         )
         if min_tier_raw is not None:
             allowed = {"A", "B"} if min_tier_raw == "B" else {"A"}
@@ -163,7 +191,14 @@ def create_app(
             )
         in_use_ids = store.node_ids_in_use()
         percentiles = (
-            speed_percentile_map(nodes) if settings.stability_enabled else None
+            speed_percentile_map(
+                nodes,
+                max_age_s=settings.stability_max_age_s
+                if settings.stability_enabled
+                else None,
+            )
+            if settings.stability_enabled
+            else None
         )
         return jsonify(
             {
@@ -184,7 +219,9 @@ def create_app(
         if settings.stability_enabled:
             # Percentile context: the node's own protocol's alive population.
             cohort = store.load_nodes(state="alive", protocols={node.protocol})
-            percentiles = speed_percentile_map(cohort)
+            percentiles = speed_percentile_map(
+                cohort, max_age_s=settings.stability_max_age_s
+            )
         else:
             percentiles = None
         detail = _serialize_node(
@@ -283,9 +320,7 @@ def create_app(
             )
         assigner.release_tunnel(store, tunnel_id)
         store.delete_tunnel(tunnel_id)
-        engine._strikes.pop(tunnel_id, None)
-        engine._rendered.pop(tunnel_id, None)
-        engine._last_check.pop(tunnel_id, None)
+        engine.forget_tunnel(tunnel_id)
         return ("", 204)
 
     @app.get("/host")
@@ -359,7 +394,12 @@ def _serialize_tunnel(
         if (node := store.get_node(node_id)) is not None
     ]
     percentiles = (
-        speed_percentile_map(assigned)
+        speed_percentile_map(
+            assigned,
+            max_age_s=(
+                settings.stability_max_age_s if settings.stability_enabled else None
+            ),
+        )
         if settings and settings.stability_enabled
         else None
     )
@@ -418,6 +458,7 @@ def _serialize_node(
         "state": node.state,
         "last_latency_ms": node.last_latency_ms,
         "throughput_kb_s": node.throughput_kb_s,
+        "last_error": node.last_error,
         "in_use": in_use,
         "first_seen_s": _iso(node.first_seen_s),
         "probe_total": node.probe_total,
@@ -459,4 +500,5 @@ def _serialize_tunnel_node(
         "probe_total": base["probe_total"],
         "tier": base["tier"],
         "score": base["score"],
+        "last_error": base["last_error"],
     }

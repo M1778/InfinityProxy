@@ -24,7 +24,7 @@ change must update the docs/ADRs in the same change.
 | `docs/api.md` | Control API endpoints, payloads, errors, env config table |
 | `docs/scraping.md` | Source manifest, fetch loop, dedup, liveness filter, attribution |
 | `docs/dashboard.md` | Panel architecture: SSE, charts, port layout |
-| `docs/adr/` | 11 accepted decisions (0001–0011: per-tunnel containers, SQLite, localhost API, MIT+attribution, urltest rotation, relay-grade liveness, web panel, throughput-certified pool, stability-scored assignment, hostagent, throughput target/Host header) |
+| `docs/adr/` | 12 accepted decisions (0001–0012: per-tunnel containers, SQLite, localhost API, MIT+attribution, urltest rotation, relay-grade liveness, web panel, throughput-certified pool, stability-scored assignment, hostagent, throughput target/Host header, multi-tenant control center) |
 | `docs/benchmark.md` | Real-stack benchmark harness results: first 10-minute run findings |
 | `ROADMAP.md` | v1 surface + post-v1 ambitions and stated no's |
 | `CONTRIBUTING.md` | Build, test, CI, and contribution conventions |
@@ -39,8 +39,11 @@ Never call a tunnel a "proxy server" or a node a "server". Full rules in
 ## Key facts to not re-derive
 
 - Control API: `127.0.0.1:8787`, unauthenticated by design, localhost-only
-  (ADR-0003). Panel: `127.0.0.1:8000`, same semantics (ADR-0007). Don't document
-  or build remote exposure for either.
+  (ADR-0003). Panel: `127.0.0.1:8000`, same semantics (ADR-0007). Control
+  center for multi-tenant boards: `127.0.0.1:8790`, compose profile `tenancy`
+  (ADR-0012) — it fronts the engine with `X-Operator-Key`/`X-Admin-Key` auth,
+  tunnel-scoped leases, and credit metering; the engine surface itself gains
+  nothing. Don't document or build remote exposure for either control surface.
 - Tunnel ports: `10000–59999` from `INFINITY_TUNNEL_RANGE`; credentials stable
   per tunnel, never change on renew.
 - Liveness: protocol handshake, batch 50, 4s timeout; per-tunnel health check

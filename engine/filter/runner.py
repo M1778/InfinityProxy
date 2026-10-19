@@ -24,9 +24,12 @@ def batch_probe(
         raise ValueError("batch_size must be >= 1")
     workers = min(batch_size, max_workers if max_workers is not None else batch_size)
     results: dict[str, ProbeResult] = {}
-    for start in range(0, len(nodes), batch_size):
-        chunk = nodes[start : start + batch_size]
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+    # One executor for the whole pass: recreating it per chunk paid thread
+    # create/teardown for every 50 nodes and left concurrency gaps between
+    # chunks while the pool spun up again.
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for start in range(0, len(nodes), batch_size):
+            chunk = nodes[start : start + batch_size]
             futures = {
                 pool.submit(
                     _probe_one, node, timeout_s, throughput, throughput_timeout_s
@@ -35,16 +38,16 @@ def batch_probe(
             }
             for future, node_id in futures.items():
                 results[node_id] = future.result()
-        if on_batch is not None:
-            # Surface every batch's verdict as soon as it is known, so the
-            # store sees alive nodes incrementally instead of after the whole
-            # (potentially very large) pass completes.
-            partial = {
-                node_id: results[node_id]
-                for node in chunk
-                if (node_id := node.node_id) in results
-            }
-            on_batch(partial)
+            if on_batch is not None:
+                # Surface every batch's verdict as soon as it is known, so the
+                # store sees alive nodes incrementally instead of after the whole
+                # (potentially very large) pass completes.
+                partial = {
+                    node_id: results[node_id]
+                    for node in chunk
+                    if (node_id := node.node_id) in results
+                }
+                on_batch(partial)
     return results
 
 

@@ -7,12 +7,17 @@ documented in [dashboard.md](./dashboard.md). Host-wide client features (System
 Proxy, TUN mode) are driven through the privileged **hostagent** at
 `INFINITY_HOSTAGENT_URL` (default `http://127.0.0.1:8788`) — see
 [Host control](#host-control-adr-0010) below and
-[ADR-0010](./adr/0010-hostagent.md).
+[ADR-0010](./adr/0010-hostagent.md). For deployments serving other operators,
+the **control center** (`tenancy` package, `127.0.0.1:8790`) fronts the engine
+with tenant accounts, API keys, tunnel scoping, and credit metering — see
+[Control center](#control-center-adr-0012) below and
+[ADR-0012](./adr/0012-multi-tenant-control-center.md).
 
 > **Security:** in v1 the control API and the panel are bound to localhost and
 > are **unauthenticated by design**. Don't publish them to any network. See
-> [ADR-0003](./adr/0003-localhost-control-api.md). Remote/authenticated control
-> (tunnel-scoped API keys) is on the [roadmap](../ROADMAP.md).
+> [ADR-0003](./adr/0003-localhost-control-api.md). The control center adds
+> tenant-scoped keys *on top of* that posture, as a separate service; the
+> engine surface itself is unchanged.
 
 All request/response bodies are JSON (`Content-Type: application/json`).
 Errors use the shape `{ "error": { "code": "...", "message": "..." } }`.
@@ -59,6 +64,11 @@ curl -s http://127.0.0.1:8787/status
 }
 ```
 
+The response is cached for **1s** and carries a weak `ETag`; a poller that
+repeats the same digest gets an empty **304** instead of a fresh body. The
+panel's 5s poll and the bench harness both funnel through this — repeat calls
+within a second cost no SQL, and unchanged bodies cost no serialization.
+
 | Field | Meaning |
 | --- | --- |
 | `pool.total` | Nodes currently tracked in the pool |
@@ -99,7 +109,7 @@ curl -s "http://127.0.0.1:8787/nodes?state=alive&protocol=ss&q=5.6.7&limit=50&in
 | `in_use` | `1`/`true` — only assigned nodes; `0`/`false` — only unassigned |
 | `q` | Substring match on server address or node id |
 | `limit` | Max rows, 1–1000, default 200 |
-| `sort` | `score` — stability order (Tier A, then B, then cold); `400` when the feature is off |
+| `sort` | `score` — stability order (Tier A, then B, then cold); `latency` — increasing probe latency, untested last; `throughput` — decreasing measured speed, unmeasured last; `400` when `sort=score` is requested while the feature is off |
 | `min_tier` | `A` — only Tier A nodes; `B` — Tier A and B (cold excluded); `400` when off or invalid |
 
 ```json
@@ -114,6 +124,7 @@ curl -s "http://127.0.0.1:8787/nodes?state=alive&protocol=ss&q=5.6.7&limit=50&in
       "state": "alive",
       "last_latency_ms": 45,
       "throughput_kb_s": 812,
+      "last_error": null,
       "in_use": false,
       "first_seen_s": "2026-09-07T02:00:00Z",
       "probe_total": 312,
@@ -131,9 +142,13 @@ curl -s "http://127.0.0.1:8787/nodes?state=alive&protocol=ss&q=5.6.7&limit=50&in
 but `tier`/`score` are `null` while the stability feature is off.
 `availability` is the Wilson lower bound over `probe_total` verdicts; `score`
 additionally blends the throughput percentile within the node's protocol
-(ADR-0009). A node is Tier A only while its verdicts are fresh (within
-`INFINITY_STABILITY_MAX_AGE_S`); aged nodes report Tier B until the working-set
-loop re-probes them.
+(ADR-0009). `last_error` carries the latest handshakes' failure text: an alive
+verdict clears it, a dead verdict writes it. A node is Tier A only while its
+verdicts are fresh (within `INFINITY_STABILITY_MAX_AGE_S`); aged nodes report
+Tier B until the working-set loop re-probes them. The speed term decays on the
+same horizon: a `throughput_kb_s` measured longer ago than
+`INFINITY_STABILITY_MAX_AGE_S` stops anchoring the percentile until a fresh
+download re-stamps it.
 
 **Errors:** `400` on non-integer or out-of-range `limit`, on `sort=score` or
 `min_tier` while the feature is off, and on an invalid `min_tier`.
@@ -241,6 +256,10 @@ curl -s http://127.0.0.1:8787/tunnels
 }
 ```
 
+`dead_swapped_24h` and `restarts_24h` are rolling 24h windows of timestamped
+events, pruned on write and on read — an entry that happened 25h ago stops
+counting without needing a midnight reset or an engine restart.
+
 ### `POST /tunnels/{id}/renew` — force renewal
 
 ```bash
@@ -309,7 +328,7 @@ state, the candidate tunnels with their last measurements, and the cached pick.
 | `proxy` | Current System Proxy state (`{enabled, tunnel, endpoint}`) |
 | `tun` | Current TUN state (`{enabled, iface, tunnel, endpoint}`) |
 | `tunnels[]` | Running tunnels with `{id, host, port, username, latency_ms, throughput_kb_s}` (latency/throughput `null` until measured) |
-| `pick` | Last auto-pick result `{tunnel, latency_ms, throughput_kb_s, cached, stale_in_s}` |
+| `pick` | Last auto-pick result `{tunnel, latency_ms, throughput_kb_s, cached, stale_in_s}`; after a fresh pass it also carries `measurements[]` — one `{tunnel, port, username, latency_ms, throughput_kb_s}` row per candidate (the same list the host table renders) |
 
 ```json
 {
@@ -336,7 +355,13 @@ curl -s -X POST http://127.0.0.1:8787/host/pick
 ```
 
 ```json
-{ "tunnel": "tu_8f3k9a", "latency_ms": 45, "throughput_kb_s": 812, "cached": false }
+{
+  "tunnel": "tu_8f3k9a", "latency_ms": 45, "throughput_kb_s": 812, "cached": false,
+  "measurements": [
+    { "tunnel": "tu_8f3k9a", "port": 10244, "username": "u_5x2m", "latency_ms": 45, "throughput_kb_s": 812 },
+    { "tunnel": "tu_9b1c2d", "port": 10456, "username": "u_4p8r", "latency_ms": 210, "throughput_kb_s": 344 }
+  ]
+}
 ```
 
 Errors: `409` (`host_target_unavailable`) when no tunnel is running to measure;
@@ -373,6 +398,88 @@ Errors: `409` (`host_target_unavailable`) for a missing/stopped tunnel when
 `enabled`; `502` (`host_privilege`) when the host lacks TUN capability;
 `502` (`hostagent_unreachable`).
 
+## Control center (ADR-0012)
+
+The `tenancy` package is the multi-tenant front for the engine, a separate
+Flask service on **`127.0.0.1:8790`** (`python -m tenancy`, compose profile
+`tenancy`). It keeps its own SQLite store (`tenancy.db`); the engine and panel
+are untouched and stay unauthenticated (ADR-0003/0007).
+
+### Key scopes
+
+| Audience | Header | Notes |
+| --- | --- | --- |
+| Visitor | — | `/v1/public/*` and `/health` only |
+| Tenant | `X-Operator-Key` | Key issued at registration. The key **is** the identity: no header/IP/body contributes identity. A live tenant without one is served exactly one 401. |
+| Host operator | `X-Admin-Key` | `INFINITY_TENANCY_ADMIN_KEY`; admin routes answer `409 admin_not_configured` until it is set. |
+
+A "lease" is a tenant-provisioned Proxy Tunnel. Ownership is recorded in a
+`tenant_tunnels` mapping; every listing is filtered through it, and tunnels
+gone from the engine (deleted elsewhere) are unlinked on read. A tenant's
+endpoint and credentials never cross the control center: lease rows carry
+`id/host/port/state` only — connecting uses the tunnel's own credentials,
+obtained the same way as for the engine (the tunnel's SOCKS/HTTP listener
+authenticates clients itself; see the engine session below).
+
+### Tenant surface
+
+| Endpoint | Notes |
+| --- | --- |
+| `POST /v1/tenants/register` | Body `{"title","email","node_count"?}`. Issues a `user_…` operator key, grants `INFINITY_TENANCY_STARTING_CREDITS`, records the signup grant on the ledger. |
+| `GET /v1/me` | Yours: profile (`tenant_id`, `tenant_key`, `title`, `email`, `state`, `node_count_requested`, `created_at`, `credits`, `credited_at`) + scoped, cred-free `leases[]`. |
+| `GET /v1/me/ledger` | Newest-first `{at_s, tenant_id, delta, reason}` entries. |
+| `POST /v1/me/tunnels` | Provisions through the engine (`node_count` clamped to `INFINITY_TENANCY_MAX_NODES`) and links the lease. Gated on credits ≥ 1 and the per-tenant cap. |
+| `DELETE /v1/me/tunnels/{id}` | Engine delete + unlink. A foreign id is `404` — checked before the engine is called at all. |
+| `POST /v1/me/tunnels/{id}/renew` | Engine renewal, mapped through the scope. |
+| `GET /v1/me/proxy-clients` | The panel's observed proxy-client rows from the tenant's leases (when the panel feeds them in via the admin surface below). |
+
+### Admin surface
+
+| Endpoint | Notes |
+| --- | --- |
+| `GET /v1/admin/tenants` | All accounts (`tenant_key` included) + counts. |
+| `POST /v1/admin/tenants` | Manually issue a seeded account (`{"title","email"?}`). |
+| `POST /v1/admin/tenants/{id}/grant` | `{"amount"}` → adds credits + `admin grant` ledger row. |
+| `POST /v1/admin/tenants/{id}/rotate` | New key; the old `X-Operator-Key` becomes `401` immediately. |
+| `POST /v1/admin/tenants/{id}/disable` | Freezes the account (subsequent calls: `403 disabled`) and tears down each of the tenant's leases via the engine. |
+| `GET /v1/admin/proxy-clients` | Recently observed proxy clients per account (the panel maps client rows to tenants). |
+
+### Public surface
+
+| Endpoint | Notes |
+| --- | --- |
+| `GET /health` | Liveness echo. |
+| `GET /v1/public/pool` | The ten public pool fields the panel charts. Engine-only extras do not cross (whitelist + shape). |
+| `GET /v1/public/tunnels` | Active tenants and their leases, endpoint-only (`id/port/state`, no credentials). |
+| `GET /v1/public/stats` | `{tenants, credits_outstanding, metered_since_s}` snapshot. |
+
+### Engine failure passes through
+
+Engine errors surface with their own codes and `502` (`engine_unreachable`
+when the connection fails outright) rather than being swallowed as generic
+500s — the control center is a thin principal, not a cache.
+
+### Example session
+
+```bash
+# sign up
+TEN=$(curl -s -X POST http://127.0.0.1:8790/v1/tenants/register \
+  -d '{"title":"acme","email":"ops@acme.co"}')
+KEY=$(echo "$TEN" | python3 -c "import sys,json;print(json.load(sys.stdin)['tenant_key'])")
+
+# provision a tunnel on your credits
+curl -s -X POST http://127.0.0.1:8790/v1/me/tunnels \
+  -H "X-Operator-Key: $KEY" -d '{}'
+
+# your leases (endpoint-only; credentials live with the tunnel itself)
+curl -s http://127.0.0.1:8790/v1/me -H "X-Operator-Key: $KEY"
+
+# teardown
+curl -s -X DELETE "http://127.0.0.1:8790/v1/me/tunnels/$(
+  echo '{"id":"tu_abcd"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])"
+)" -H "X-Operator-Key: $KEY"
+```
+
 ## Configuration
 
 All overridable via environment variables (defaults in brackets). The shipped
@@ -392,6 +499,7 @@ setting them in `.env` works.
 | `INFINITY_BATCH_SIZE` | `50` | Concurrent liveness probes per batch |
 | `INFINITY_PROBE_TIMEOUT_MS` | `4000` | Per-node handshake timeout |
 | `INFINITY_PROBE_BUDGET_PER_REFRESH` | `5000` | Untested nodes probed per source refresh |
+| `INFINITY_DEAD_RETEST_BUDGET` | `200` | Already-dead nodes re-tested FIFO per source refresh, in addition to the untested budget |
 | `INFINITY_HEALTH_INTERVAL_S` | `30` | Per-tunnel health-check interval |
 | `INFINITY_MAX_MISSES` | `2` | Consecutive failures before a node is swapped |
 | `INFINITY_URTEST_INTERVAL_S` | `30` | Per-tunnel sing-box `urltest` health-check cadence; the rotator re-probes its nodes at this rate and excludes dead ones from selection (clamped to ≥ 10s, sing-box's minimum) |
@@ -400,7 +508,7 @@ setting them in `.env` works.
 | `INFINITY_THROUGHPUT_MIN_KB_S` | `200` | Admission floor: nodes certified below this many KiB/s are demoted at probe time |
 | `INFINITY_THROUGHPUT_SAMPLE_BYTES` | `1048576` | Bytes the probe reads from the throughput target per node (1 MiB default) |
 | `INFINITY_THROUGHPUT_TIMEOUT_S` | `12` | Per-node cap on the throughput download; a node that cannot deliver the sample in this window drops below the floor |
-| `INFINITY_THROUGHPUT_HOST` / `_PORT` / `_PATH` | `speed.cloudflare.com` / `80` / `/__down?bytes=10485760` | Throughput target the probe downloads through each node (ADR-0011); every relayed GET carries a `Host:` header |
+| `INFINITY_THROUGHPUT_HOST` / `_PORT` / `_PATH` | `speed.cloudflare.com` / `80` / `/__down?bytes=10485760` | Throughput target the probe downloads through each node (ADR-0012); every relayed GET carries a `Host:` header |
 | `INFINITY_STABILITY_ENABLED` | `1` | Accumulate windowed probe counters and assign nodes by stability score (ADR-0009). Set `0`/`false`/`no` for the legacy throughput-first order |
 | `INFINITY_STABILITY_MIN_PROBES` | `6` | Verdicts a node needs before it is *evaluated*; fewer probes = cold, sorted after every evaluated node |
 | `INFINITY_STABILITY_MIN_AVAIL` | `0.4` | Availability floor separating Tier A (reliable) from Tier B |
@@ -419,6 +527,25 @@ setting them in `.env` works.
 | `INFINITY_HOST_PICK_SAMPLE_BYTES` | `262144` | Bytes read per candidate during auto-pick throughput measurement (256 KiB default) |
 | `INFINITY_HOST_PICK_TIMEOUT_S` | `8.0` | Per-candidate measurement cap |
 | `INFINITY_DB` | `infinity.db` | SQLite file path |
+
+Control center settings (`INFINITY_TENANCY_*`, ADR-0012):
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `INFINITY_TENANCY_HOST` | `127.0.0.1` | Control center bind address (public boards must set this deliberately) |
+| `INFINITY_TENANCY_PORT` | `8790` | Control center bind port |
+| `INFINITY_TENANCY_ENGINE_URL` | `http://127.0.0.1:8787` | Control center → engine base URL |
+| `INFINITY_TENANCY_DB` | `tenancy.db` | Control center SQLite path (separate from `INFINITY_DB`) |
+| `INFINITY_TENANCY_ADMIN_KEY` | — |Admin key for `/v1/admin/*`; unset = admin routes answer `409 admin_not_configured` |
+| `INFINITY_TENANCY_PAGE_TITLE` | `InfinityProxy control center` | Title the board advertises on its index |
+| `INFINITY_TENANCY_TUNNEL_HOST` | — | Host advertised to tenants for connecting to leases (default: whatever `shaped_tunnels` reflects from the engine) |
+| `INFINITY_TENANCY_STARTING_CREDITS` | `720` | Signup grant (30 days at one credit per hour) |
+| `INFINITY_TENANCY_MAX_TENANTS` | `50` | Registration cap; signups beyond answer `503 board_full` |
+| `INFINITY_TENANCY_MAX_TUNNELS` | `4` | Per-tenant lease cap; provisioning beyond answers `409 lease_limit` |
+| `INFINITY_TENANCY_MAX_NODES` | `20` | Per-tunnel node-count ceiling for tenant requests (clamped, not rejected) |
+| `INFINITY_TENANCY_CREDIT_INTERVAL_S` | `3600` | Wall-clock seconds one credit covers; `0` disables metering |
+| `INFINITY_TENANCY_METER_ENABLED` | `1` | Metering on/off. Off = provisioning stays credit-free |
+| `INFINITY_TENANCY_LEDGER_KEEP` | `50` | Ledger rows kept per tenant |
 
 Source cadences are per-source (see [docs/scraping.md](./scraping.md#source-manifest)).
 
@@ -439,6 +566,19 @@ Source cadences are per-source (see [docs/scraping.md](./scraping.md#source-mani
 | `host_target_unavailable` | 409 | The requested target tunnel is missing/stopped, or no tunnel is running for `"auto"` |
 | `host_unsupported` | 409 | Host capability missing for the operation (e.g. `proxy` on a host with no detected desktop) |
 | `host_privilege` | 502 | TUN mode is impossible on this host (no `/dev/net/tun`, no privilege) |
+
+Control center error codes (ADR-0012):
+
+| Code | HTTP | Meaning |
+| --- | --- | --- |
+| `missing_key` | 401 | `X-Operator-Key` absent |
+| `invalid_key` | 401 | Unknown key (or a rejected admin key) |
+| `disabled` | 403 | Tenant disabled by the host operator |
+| `admin_not_configured` | 409 | `/v1/admin/*` on a board without `INFINITY_TENANCY_ADMIN_KEY` |
+| `out_of_credits` | 402 | Provisioning while below one credit |
+| `board_full` | 503 | Registration at `INFINITY_TENANCY_MAX_TENANTS` |
+| `lease_limit` | 409 | Provisioning at `INFINITY_TENANCY_MAX_TUNNELS` |
+| `engine_unreachable` | 502 | Engine request failed outright (timeout/refused) |
 
 ## Example session
 

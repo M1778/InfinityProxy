@@ -60,6 +60,9 @@ Public feeds ─────► │  Scraper loop ─► Node pool ─► Livene
 - **Panel** — a second Flask process (`python -m panel`) on `127.0.0.1:8000`
   crawls the control API every 5s, keeps a 2h rolling history, and streams a
   snapshot to the browser over SSE (see [docs/dashboard.md](./dashboard.md)).
+  The crawl only runs while an SSE watcher is connected — an idle panel makes
+  no engine calls — and an unexpected exception in the crawl thread is logged
+  and retried on the next tick instead of silently killing the stream.
 
 ### Tunnels
 
@@ -131,6 +134,28 @@ measure every running tunnel's egress (latency through the tunnel proxy, then a
 download-throughput sample), pick the best latency, tie-break by throughput, and
 cache the result for `INFINITY_HOST_PICK_TTL_S` (default 60s).
 
+### The control center (multi-tenant edge)
+
+**Third, opt-in** front for deployments serving other operators
+([ADR-0012](./adr/0012-multi-tenant-control-center.md)): `tenancy/`, run via
+`python -m tenancy` on its own loopback listener `127.0.0.1:8790`.
+It keeps its own SQLite store (`tenancy.db` — tenants, ledger, the
+tenant→tunnel mapping) separate from the engine's pool file, and calls the
+engine as the board's single local principal — the engine Control API itself
+gains nothing and stays unauthenticated (ADR-0003).
+
+| Service | Address | Env | Default |
+| --- | --- | --- | --- |
+| Control center | `127.0.0.1:8790` | `INFINITY_TENANCY_PORT` | `8790` |
+
+Three key scopes: the tenant's `X-Operator-Key` (identity is *only* the key),
+the host operator's `X-Admin-Key` (`INFINITY_TENANCY_ADMIN_KEY`; unset board =
+no admin surface), and the unauthenticated `/v1/public/*` metrics view.
+Lease ownership is a mapping table, every lease row crossing the API is
+credential-free (`id/host/port/state`), and credits meter wall-clock runtime
+per tenant ledger. Deployment rides compose profile `tenancy`; a default
+stack never starts it. Endpoints and configuration: docs/api.md#control-center-adr-0012.
+
 ### SQLite store
 
 A single SQLite file (default `infinity.db`) on a Docker volume persists:
@@ -138,9 +163,14 @@ A single SQLite file (default `infinity.db`) on a Docker volume persists:
 - **tunnels** — id, state, port, credentials, `node_count` requested/granted,
   `auto_renew` flag, timestamps,
 - **node cache** — node URIs, source, last-seen, last latency, certified
-  throughput (KiB/s), assignment, and (since ADR-0009) the windowed probe
-  counters `probe_ok`/`probe_total` plus `last_probe_s`/`last_alive_s`,
+  throughput (KiB/s) plus when it was measured, the latest probe failure
+  text (`last_error`: a dead verdict writes it, an alive verdict clears it),
+  assignment, and (since ADR-0009) the windowed probe counters
+  `probe_ok`/`probe_total` plus `last_probe_s`/`last_alive_s`,
   `window_started_s`, and the cached availability term `score_f`.
+  Four read-path indexes (`state`, `assigned_to`, (`protocol`,`state`),
+  `score_f DESC`) back the panel's filtered views and the assignable pool
+  count.
 
 Raw scrape batches are ephemeral. On boot the Engine loads this state and
 **reconciles**: it adopts containers whose config still matches, and stops
@@ -221,6 +251,12 @@ sequenceDiagram
 - Each tunnel with `auto_renew=true` is health-checked every **30s**.
 - A node is probed with its own protocol handshake. After **2 consecutive
   failures** the node is marked dead and swapped.
+- A health pass runs its probes **outside the engine lock** and takes it only
+  for strike bookkeeping; a full batch takes seconds per node, and holding the
+  lock that long would queue every renew request behind it. Passes are
+  single-flight per tunnel: a scheduled pass and an API
+  `POST /tunnels/{id}/renew` for the same tunnel never probe the same nodes in
+  parallel — the second call is a no-op while the first is in flight.
 - The swap draws from the node pool, preferring nodes already certified alive —
   and since [ADR-0008](./adr/0008-throughput-certified-pool.md), the nodes with
   the highest certified throughput. With stability enabled
@@ -263,6 +299,11 @@ pool on it ([ADR-0009](./adr/0009-stability-scored-assignment.md)):
   fold semantics, and the assigner orders candidates Tier A → B → cold by the
   Wilson availability + within-protocol speed score (`engine/stability.py`).
   Latency remains sing-box `urltest`'s job.
+- **Speed-term decay.** A throughput measurement older than the same freshness
+  horizon (`INFINITY_STABILITY_MAX_AGE_S`) stops ranking as if the node were
+  never measured — a stale certified KiB/s can no longer outbid Tier-A
+  availability forever. ADR-0008's certificate itself is untouched: health
+  checks still never re-measure throughput.
 
 The panel surfaces the resulting tier counts, mean availability, and working-set
 count (see [docs/dashboard.md](./dashboard.md)); the tuned weights and their
@@ -288,6 +329,10 @@ The Engine never queues or blocks a create request on the pool.
   [ADR-0007](./adr/0007-web-panel.md) and [docs/dashboard.md](./dashboard.md).
 - Hostagent control API: `127.0.0.1:8788`, same localhost-only rule — the
   privileged host-control surface (opt-in, see [ADR-0010](./adr/0010-hostagent.md)).
+- Control center: `127.0.0.1:8790` (opt-in, `--profile tenancy`) — the
+  multi-tenant edge with its own key scopes and credit metering, calling the
+  engine as a local principal; see [ADR-0012](./adr/0012-multi-tenant-control-center.md)
+  and [docs/api.md](./api.md#control-center-adr-0012).
 - Mind that your public network is not published to Docker by default (see
   [CONTRIBUTING.md](../CONTRIBUTING.md)).
 - Tunnels: one published port each, from `INFINITY_TUNNEL_RANGE`. Each tunnel
@@ -317,6 +362,12 @@ InfinityProxy/
 │   ├── app.py                #   loopback control API (:8788)
 │   ├── platform.py           #   capabilities, gsettings/KDE proxy setter
 │   └── singbox.py            #   TUN sing-box config renderer
+├── tenancy/                  # multi-tenant control center (ADR-0012)
+│   ├── app.py                #   key scopes, leases, credits (:8790)
+│   ├── engine.py             #   engine edge + credential-free projections
+│   ├── store.py              #   tenants, ledger, tenant→tunnel mapping
+│   ├── billing.py            #   wall-clock credit metering
+│   └── models.py             #   Tenant / LedgerEntry dataclasses
 ├── demo/                     # GitHub Pages demo bootstrap (static fixtures)
 ├── tunnel-image/             # Docker image wrapping sing-box for tunnels
 ├── tools/                    # benchmark harness
@@ -341,3 +392,4 @@ Relevant architecture decision records:
 - [0009 Stability-scored assignment](./adr/0009-stability-scored-assignment.md)
 - [0010 Host system proxy + TUN via hostagent](./adr/0010-hostagent.md)
 - [0011 Throughput target + probe Host header](./adr/0011-throughput-target-and-host-header.md)
+- [0012 Multi-tenant control center](./adr/0012-multi-tenant-control-center.md)

@@ -61,7 +61,9 @@ CREATE TABLE IF NOT EXISTS nodes (
     window_started_s REAL,
     last_probe_s   REAL,
     last_alive_s   REAL,
-    score_f        REAL
+    score_f        REAL,
+    last_error     TEXT,
+    throughput_measured_s REAL
 );
 
 CREATE TABLE IF NOT EXISTS sources (
@@ -71,6 +73,13 @@ CREATE TABLE IF NOT EXISTS sources (
     next_fetch_s REAL
 );
 """
+
+_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_nodes_state ON nodes(state)",
+    "CREATE INDEX IF NOT EXISTS idx_nodes_assigned_to ON nodes(assigned_to)",
+    "CREATE INDEX IF NOT EXISTS idx_nodes_protocol_state ON nodes(protocol, state)",
+    "CREATE INDEX IF NOT EXISTS idx_nodes_working_set ON nodes(score_f DESC)",
+)
 
 
 class Store:
@@ -98,6 +107,11 @@ class Store:
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._migrate()
+            # Indexes come after the column migration: on a pre-migration
+            # database the nodes table still lacks the indexed columns until
+            # the ALTERs above have run.
+            for index_sql in _INDEXES:
+                self._conn.execute(index_sql)
             self._conn.commit()
 
     def _migrate(self) -> None:
@@ -117,6 +131,8 @@ class Store:
             ("last_probe_s", "REAL"),
             ("last_alive_s", "REAL"),
             ("score_f", "REAL"),
+            ("last_error", "TEXT"),
+            ("throughput_measured_s", "REAL"),
         ):
             if name not in cols:
                 self._conn.execute(f"ALTER TABLE nodes ADD COLUMN {name} {decl}")
@@ -148,12 +164,14 @@ class Store:
             last_latency_ms=row["last_latency_ms"],
             state=row["state"],
             throughput_kb_s=row["throughput_kb_s"],
+            throughput_measured_s=row["throughput_measured_s"],
             probe_ok=row["probe_ok"] or 0,
             probe_total=row["probe_total"] or 0,
             window_started_s=row["window_started_s"],
             last_probe_s=row["last_probe_s"],
             last_alive_s=row["last_alive_s"],
             score_f=row["score_f"],
+            last_error=row["last_error"],
         )
 
     def save_tunnel(self, t: Tunnel) -> None:
@@ -242,49 +260,49 @@ class Store:
                 ).fetchone()
         return int(row[0])
 
+    def _existing_ids(self, node_ids: list[str]) -> set[str]:
+        found: set[str] = set()
+        for start in range(0, len(node_ids), 900):
+            slice_ = node_ids[start : start + 900]
+            marks = ",".join("?" * len(slice_))
+            rows = self._conn.execute(
+                f"SELECT node_id FROM nodes WHERE node_id IN ({marks})", slice_
+            ).fetchall()
+            found.update(row[0] for row in rows)
+        return found
+
     def upsert_candidates(self, candidates: list[NodeCandidate]) -> int:
-        inserted = 0
+        if not candidates:
+            return 0
+        prepared = [Node.from_candidate(c) for c in candidates]
         with self._lock:
-            for c in candidates:
-                candidate = Node.from_candidate(c)
-                existing = self._conn.execute(
-                    "SELECT uri, protocol FROM nodes WHERE node_id = ?",
-                    (candidate.node_id,),
-                ).fetchone()
-                if existing is None:
-                    self._conn.execute(
-                        """INSERT INTO nodes
-                               (node_id, uri, protocol, server, port, user,
-                                source, first_seen_s)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (
-                            candidate.node_id,
-                            candidate.uri,
-                            candidate.protocol,
-                            candidate.server,
-                            candidate.port,
-                            candidate.user,
-                            candidate.source,
-                            candidate.first_seen_s,
-                        ),
-                    )
-                    inserted += 1
-                elif (
-                    existing["uri"] != candidate.uri
-                    or existing["protocol"] != candidate.protocol
-                ):
-                    # Identity already known: change the URI/protocol, keep the
-                    # first-seen source as attribution. A changed URI makes any
-                    # previous liveness verdict stale, so the node is sent back
-                    # to the admission gate (untested) rather than keeping a
-                    # possibly-garbage "alive" state.
-                    self._conn.execute(
-                        "UPDATE nodes SET uri = ?, protocol = ?, state = 'untested' "
-                        "WHERE node_id = ?",
-                        (candidate.uri, candidate.protocol, candidate.node_id),
-                    )
+            # One membership lookup + two executemany passes instead of a
+            # SELECT+INSERT/UPDATE round-trip per row. Existing rows keep the
+            # first-seen source and timestamps; a URI/protocol change voids any
+            # stored verdict by sending the node back to the admission gate.
+            known = self._existing_ids([n.node_id for n in prepared])
+            fresh = [n for n in prepared if n.node_id not in known]
+            known_rows = [n for n in prepared if n.node_id in known]
+            if fresh:
+                self._conn.executemany(
+                    """INSERT INTO nodes
+                           (node_id, uri, protocol, server, port, user, source,
+                            first_seen_s)
+                       VALUES (:node_id, :uri, :protocol, :server, :port, :user,
+                               :source, :first_seen_s)""",
+                    (n.as_insert_row() for n in fresh),
+                )
+            if known_rows:
+                self._conn.executemany(
+                    """UPDATE nodes SET uri = :uri, protocol = :protocol,
+                           state = CASE
+                               WHEN uri != :uri OR protocol != :protocol
+                               THEN 'untested' ELSE state END
+                       WHERE node_id = :node_id""",
+                    (n.as_insert_row() for n in known_rows),
+                )
             self._conn.commit()
-        return inserted
+        return len(fresh)
 
     def load_nodes(
         self,
@@ -296,6 +314,7 @@ class Store:
         query: str | None = None,
         in_use: bool | None = None,
         order_by_score: bool = False,
+        order_by: str | None = None,
     ) -> list[Node]:
         sql = "SELECT * FROM nodes"
         clauses: list[str] = []
@@ -323,6 +342,10 @@ class Store:
             # score_f desc is the availability term (ADR-0009): NULL (cold or
             # feature-off) rows sort last, then the existing state/latency order.
             sql += " ORDER BY score_f DESC NULLS LAST, state, last_latency_ms"
+        elif order_by == "latency":
+            sql += " ORDER BY last_latency_ms IS NULL, last_latency_ms ASC"
+        elif order_by == "throughput":
+            sql += " ORDER BY throughput_kb_s IS NULL, throughput_kb_s DESC"
         elif oldest_first:
             sql += " ORDER BY first_seen_s, node_id"
         else:
@@ -381,40 +404,65 @@ class Store:
                         started = now
                     ok += 1 if res.alive else 0
                     total += 1
+                    # A fresh throughput reading stamps its measurement time;
+                    # a handshake-only pass leaves the stamp alone so the
+                    # speed term decays on its own horizon without new probe
+                    # traffic (ADR-0009 freshness horizon, reused).
+                    stamp_sql = (
+                        "throughput_measured_s = ?," if res.throughput_kb_s else ""
+                    )
+                    stamp_params = (now,) if res.throughput_kb_s else ()
                     self._conn.execute(
                         f"""UPDATE nodes SET
-                                state = ?,
-                                last_latency_ms = ?,
-                                throughput_kb_s = COALESCE(?, throughput_kb_s),
-                                probe_ok = ?,
-                                probe_total = ?,
-                                window_started_s = ?,
-                                last_probe_s = ?,
-                                last_alive_s = CASE WHEN ? THEN ? ELSE last_alive_s END,
-                                score_f = {_wilson_sql(str(ok), str(total))}
+                            state = ?,
+                            last_latency_ms = ?,
+                            throughput_kb_s = COALESCE(?, throughput_kb_s),
+                            {stamp_sql}
+                            probe_ok = ?,
+                            probe_total = ?,
+                            window_started_s = ?,
+                            last_probe_s = ?,
+                            last_alive_s = CASE WHEN ? THEN ? ELSE last_alive_s END,
+                            score_f = {_wilson_sql(str(ok), str(total))},
+                            last_error = CASE WHEN ? THEN NULL ELSE ? END
+                        WHERE node_id = ?""",
+                        (
+                            ("alive" if res.alive else "dead",)
+                            + (
+                                res.latency_ms,
+                                res.throughput_kb_s,
+                            )
+                            + stamp_params
+                            + (
+                                ok,
+                                total,
+                                started,
+                                now,
+                                res.alive,
+                                now,
+                                res.alive,
+                                res.error,
+                                node_id,
+                            )
+                        ),
+                    )
+                else:
+                    stamp_sql = (
+                        ", throughput_measured_s = ?" if res.throughput_kb_s else ""
+                    )
+                    stamp_params = (now,) if res.throughput_kb_s else ()
+                    self._conn.execute(
+                        f"""UPDATE nodes SET state = ?, last_latency_ms = ?,
+                            throughput_kb_s = COALESCE(?, throughput_kb_s){stamp_sql},
+                            last_error = CASE WHEN ? THEN NULL ELSE ? END
                             WHERE node_id = ?""",
                         (
                             "alive" if res.alive else "dead",
                             res.latency_ms,
                             res.throughput_kb_s,
-                            ok,
-                            total,
-                            started,
-                            now,
+                            *stamp_params,
                             res.alive,
-                            now,
-                            node_id,
-                        ),
-                    )
-                else:
-                    self._conn.execute(
-                        "UPDATE nodes SET state = ?, last_latency_ms = ?, "
-                        "throughput_kb_s = COALESCE(?, throughput_kb_s) "
-                        "WHERE node_id = ?",
-                        (
-                            "alive" if res.alive else "dead",
-                            res.latency_ms,
-                            res.throughput_kb_s,
+                            res.error,
                             node_id,
                         ),
                     )
@@ -482,13 +530,15 @@ class Store:
                         [min_probes, min_avail] + extra,
                     ).fetchone()[0]
                 )
-                tier_b = int(
+                # Every probed node is either Tier A or not: one complemented
+                # count instead of a second full Wilson pass over the pool.
+                probed_count = int(
                     self._conn.execute(
-                        f"SELECT COUNT(*) FROM nodes WHERE {probed}"
-                        f" AND NOT ({wilson} >= ?{fresh})",
-                        [min_probes, min_avail] + extra,
+                        f"SELECT COUNT(*) FROM nodes WHERE {probed}",
+                        [min_probes],
                     ).fetchone()[0]
                 )
+                tier_b = probed_count - tier_a
                 row = self._conn.execute(
                     "SELECT AVG(score_f) FROM nodes WHERE state = 'alive'"
                 ).fetchone()
@@ -584,6 +634,21 @@ class Store:
                 "SELECT node_id FROM nodes WHERE assigned_to IS NOT NULL"
             ).fetchall()
         return {r[0] for r in rows}
+
+    def assignable_count(self, protocols: set[str]) -> int:
+        """Alive, unassigned nodes across the sing-box-dialable protocols.
+
+        A COUNT over the same predicate the assigner scans, so `/status` never
+        materialises the pool into Python objects just to count a slice of it.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                f"""SELECT COUNT(*) FROM nodes
+                    WHERE state = 'alive' AND assigned_to IS NULL
+                    AND protocol IN ({",".join("?" for _ in protocols)})""",
+                sorted(protocols),
+            ).fetchone()
+        return int(row[0])
 
     def assigned_tunnel_ids(self) -> set[str]:
         with self._lock:

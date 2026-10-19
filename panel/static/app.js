@@ -1,7 +1,7 @@
 /* InfinityProxy panel — vanilla JS, zero build. Chat.js 4 vendored (MIT). */
 "use strict";
 
-const $ = (sel) => document.querySelector(sel);
+const $ = (sel, scope) => (scope || document).querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => (
@@ -14,22 +14,43 @@ const state = {
   nodes: null,          // last /api/nodes result
   host: null,           // last /api/host result
   hostError: null,
+  nodeSort: null,       // "latency" | "throughput" | null (score default)
   lastSnapAt: 0,
   panels: { pool: null, tunnel: null, proto: null, donut: null },
 };
 
-/* ---------- live connection ---------- */
+/* ---------- connection pill ---------- */
 
-function setPill(label) {
-  const el = $("#conn-pill");
-  el.dataset.state = label;
-  $("#conn-pill .plabel").textContent = label;
+function applyPillMode(snap, connectivityChanged) {
+  if (!connectivityChanged && !window.matchMedia("(max-width: 560px)").matches) {
+    return;
+  }
+  if (window.matchMedia("(max-width: 560px)").matches) {
+    setPillMode("collapsed");
+  } else {
+    setPillMode("expanded");
+  }
+}
+
+function setPillMode(mode) {
+  document.body.dataset.pillMode = mode;
+  $("#pill-toggle").setAttribute("aria-expanded", mode === "expanded" ? "true" : "false");
+}
+
+function bindPillToggle() {
+  $("#pill-toggle").addEventListener("click", () => {
+    const expanded = document.body.dataset.pillMode === "expanded";
+    setPillMode(expanded ? "collapsed" : "expanded");
+    $("#pill-toggle").setAttribute("aria-expanded", String(!expanded));
+  });
 }
 
 function onSnap(snap) {
+  const wasLive = state.snap && state.snap.reachable;
   state.snap = snap;
   state.lastSnapAt = Date.now();
   setPill(snap.reachable ? "live" : "error");
+  applyPillMode(snap, wasLive !== snap.reachable);
   renderOverview();
   renderTunnels();
   renderSources();
@@ -37,6 +58,7 @@ function onSnap(snap) {
 }
 
 function connectSSE() {
+  bindPillToggle();
   const es = new EventSource("/api/events");
   es.addEventListener("snapshot", (e) => onSnap(JSON.parse(e.data)));
   es.addEventListener("heartbeat", () => { /* keeps the connection warm */ });
@@ -90,10 +112,19 @@ function toast(kind, message) {
   window.setTimeout(() => el.remove(), 5000);
 }
 
+function setPill(label) {
+  const pill = $("#conn-pill");
+  pill.dataset.state = label;
+  $(".plabel", pill).textContent = label;
+  $("#pill-toggle").dataset.state = label;
+}
+
 function showModal(title, bodyHtml) {
+  const modal = $("#modal");
   $("#modal-title").textContent = title;
   $("#modal-body").innerHTML = bodyHtml;
-  $("#modal").hidden = false;
+  modal.hidden = false;
+  modal.focus();
 }
 function hideModal() { $("#modal").hidden = true; }
 function confirm_(message) { return window.confirm(message); }
@@ -103,7 +134,12 @@ function confirm_(message) { return window.confirm(message); }
 function route() {
   const name = (location.hash || "#overview").slice(1);
   $$(".view").forEach((v) => { v.hidden = v.dataset.name !== name; });
-  $$(".tabs a").forEach((a) => a.classList.toggle("active", a.dataset.view === name));
+  $$(".tabs a").forEach((a) => {
+    a.classList.toggle("active", a.dataset.view === name);
+    a.setAttribute("aria-current", a.dataset.view === name ? "page" : "false");
+  });
+  const title = $("#page-title");
+  if (title) title.textContent = name.charAt(0).toUpperCase() + name.slice(1);
   if (name === "nodes" && !state.nodes) loadNodes();
   if (name === "tunnels") renderTunnels();
   if (name === "host") refreshHost();
@@ -358,13 +394,13 @@ function renderTunnels() {
     const health = t.health || {};
     const creds = `${t.username}:${t.password}@127.0.0.1:${t.port}`;
     return `<tr>
-      <td class="mono">${esc(t.id)}</td>
-      <td class="mono">127.0.0.1:${t.port}</td>
-      <td>${t.node_count_granted}/${t.node_count_requested}</td>
-      <td>${tierMix(t.nodes || [])}</td>
-      <td>${stateBadge(t.state, t.degraded)}</td>
-      <td class="muted">${esc(health.healthy ? "healthy" : "unhealthy")}${health.dead_swapped_24h ? ` · ${health.dead_swapped_24h} swap` : ""}${health.restarts_24h ? ` · ${health.restarts_24h} restart` : ""}</td>
-      <td>
+      <td class="mono" data-label="id">${esc(t.id)}</td>
+      <td class="mono" data-label="endpoint">127.0.0.1:${t.port}</td>
+      <td data-label="granted" data-desktop-only>${t.node_count_granted}/${t.node_count_requested}</td>
+      <td data-label="tier mix" data-desktop-only>${tierMix(t.nodes || [])}</td>
+      <td data-label="state">${stateBadge(t.state, t.degraded)}</td>
+      <td class="muted" data-label="health" data-desktop-only>${esc(health.healthy ? "healthy" : "unhealthy")}${health.dead_swapped_24h ? ` · ${health.dead_swapped_24h} swap` : ""}${health.restarts_24h ? ` · ${health.restarts_24h} restart` : ""}</td>
+      <td data-label="actions" class="row-actions">
         <div class="actions">
           <button class="btn sm" data-act="copy" data-creds="${esc(creds)}" title="copy endpoint+credentials">Copy</button>
           <button class="btn sm" data-act="test" data-id="${esc(t.id)}">Test</button>
@@ -373,7 +409,7 @@ function renderTunnels() {
         </div>
       </td>
     </tr>`;
-  }).join("") || `<tr><td colspan="7" class="muted">No tunnels. Create one above.</td></tr>`;
+  }).join("") || `<tr><td colspan="7" class="muted" data-label="status">No tunnels. Create one above.</td></tr>`;
 }
 
 async function createTunnel(e) {
@@ -419,6 +455,11 @@ async function testTunnel(id) {
 
 /* ---------- nodes view ---------- */
 
+function toggleNodeSort(sort) {
+  state.nodeSort = state.nodeSort === sort ? null : sort;
+  loadNodes();
+}
+
 async function loadNodes() {
   const params = new URLSearchParams();
   const state_ = $("#f-state").value; if (state_) params.set("state", state_);
@@ -428,6 +469,7 @@ async function loadNodes() {
   const q = $("#f-q").value.trim(); if (q) params.set("q", q);
   const limit = parseInt($("#f-limit").value, 10);
   params.set("limit", Number.isFinite(limit) && limit >= 1 && limit <= 1000 ? limit : 200);
+  if (state.nodeSort) params.set("sort", state.nodeSort);
   try {
     const res = await api("/api/nodes?" + params.toString());
     state.nodes = res;
@@ -437,21 +479,28 @@ async function loadNodes() {
 
 function renderNodes() {
   if (!state.nodes) return;
+  const latencyTh = $("#th-latency");
+  const throughputTh = $("#th-throughput");
+  latencyTh.textContent = state.nodeSort === "latency" ? "latency ▲" : "latency";
+  throughputTh.textContent =
+    state.nodeSort === "throughput" ? "throughput ▼" : "throughput";
+  latencyTh.classList.toggle("sorted", state.nodeSort === "latency");
+  throughputTh.classList.toggle("sorted", state.nodeSort === "throughput");
   const rows = state.nodes.nodes || [];
   $("#node-count").textContent = `${rows.length} node${rows.length === 1 ? "" : "s"} shown (limit ${state.nodes.limit}) — click a row for the raw URI.`;
   $("#node-table tbody").innerHTML = rows.map((n) => `<tr class="row-click" data-id="${esc(n.id)}">
-    <td class="mono">${esc(n.id.slice(0, 16))}…</td>
-    <td>${esc(n.protocol)}</td>
-    <td class="mono">${esc(n.server)}:${n.port}</td>
-    <td>${esc(n.source)}</td>
-    <td><span class="badge ${n.state === "alive" ? "ok" : n.state === "dead" ? "dead" : "untested"}">${esc(n.state)}</span></td>
-    <td class="mono">${n.last_latency_ms ?? "—"} ms</td>
-    <td class="mono">${n.throughput_kb_s ? Math.round(n.throughput_kb_s) + " KiB/s" : "—"}</td>
-    <td>${n.in_use ? '<span class="badge warn">in use</span>' : '<span class="badge idle">free</span>'}</td>
-    <td class="mono">${n.availability != null ? (n.availability * 100).toFixed(0) + "%" : "—"}</td>
-    <td class="mono">${n.score != null ? n.score.toFixed(2) : "—"}</td>
-    <td>${n.tier ? `<span class="badge ${n.tier === "A" ? "ok" : "idle"}">${esc(n.tier)}</span>` : '<span class="badge untested">cold</span>'}</td>
-  </tr>`.trim()).join("") || `<tr><td colspan="11" class="muted">No nodes match the filters.</td></tr>`;
+    <td class="mono" data-label="id">${esc(n.id.slice(0, 16))}…</td>
+    <td data-label="protocol" data-desktop-only>${esc(n.protocol)}</td>
+    <td class="mono" data-label="server" data-desktop-only>${esc(n.server)}:${n.port}</td>
+    <td data-label="source" data-desktop-only>${esc(n.source)}</td>
+    <td data-label="state">${`<span class="badge ${n.state === "alive" ? "ok" : n.state === "dead" ? "dead" : "untested"}">${esc(n.state)}</span>`}</td>
+    <td class="mono" data-label="latency" data-desktop-only>${n.last_latency_ms ?? "—"} ms</td>
+    <td class="mono" data-label="throughput" data-desktop-only>${n.throughput_kb_s ? Math.round(n.throughput_kb_s) + " KiB/s" : "—"}</td>
+    <td data-label="in use" data-desktop-only>${n.in_use ? '<span class="badge warn">in use</span>' : '<span class="badge idle">free</span>'}</td>
+    <td class="mono" data-label="avail" data-desktop-only>${n.availability != null ? (n.availability * 100).toFixed(0) + "%" : "—"}</td>
+    <td class="mono" data-label="score" data-desktop-only>${n.score != null ? n.score.toFixed(2) : "—"}</td>
+    <td data-label="tier" data-desktop-only>${n.tier ? `<span class="badge ${n.tier === "A" ? "ok" : "idle"}">${esc(n.tier)}</span>` : '<span class="badge untested">cold</span>'}</td>
+  </tr>`.trim()).join("") || `<tr><td colspan="11" class="muted" data-label="status">No nodes match the filters.</td></tr>`;
 }
 
 async function nodeDetail(id) {
@@ -478,11 +527,11 @@ function renderSources() {
   const rows = state.snap.status.sources || [];
   $("#source-table tbody").innerHTML = rows.map((s) => `
     <tr>
-      <td>${esc(s.name)}</td>
-      <td class="mono">${fmtAge(s.last_fetch_s)}</td>
-      <td class="mono">${fmtAge(s.next_fetch_s)}</td>
-      <td><button class="btn sm" data-refresh="${esc(s.name)}">Refresh now</button></td>
-    </tr>`).join("") || `<tr><td colspan="4" class="muted">No sources tracked.</td></tr>`;
+      <td data-label="name">${esc(s.name)}</td>
+      <td class="mono" data-label="last fetch">${fmtAge(s.last_fetch_s)}</td>
+      <td class="mono" data-label="next fetch">${fmtAge(s.next_fetch_s)}</td>
+      <td data-label="actions" class="row-actions"><button class="btn sm" data-refresh="${esc(s.name)}">Refresh now</button></td>
+    </tr>`).join("") || `<tr><td colspan="4" class="muted" data-label="status">No sources tracked.</td></tr>`;
 }
 
 function fmtAge(sec) {
@@ -572,6 +621,7 @@ function renderHostTargets(tunnels, pickId) {
     `<option value="auto">Auto (best)</option>` +
     tunnels
       .map((t) => {
+        if (!t || !t.id) return "";
         const lat = t.latency_ms != null ? `${t.latency_ms} ms` : "no data";
         return `<option value="${esc(t.id)}">${esc(t.id.slice(0, 12))}… :${t.port} ${lat}</option>`;
       })
@@ -586,16 +636,16 @@ function renderHostTable(rows) {
   const body = $("#host-table tbody");
   if (!rows.length) {
     body.innerHTML =
-      '<tr><td colspan="4" class="muted">No tunnel candidates yet — create one, then re-measure.</td></tr>';
+      '<tr><td colspan="4" class="muted" data-label="status">No tunnel candidates yet — create one, then re-measure.</td></tr>';
     return;
   }
   body.innerHTML = rows
     .map(
       (m) => `<tr>
-        <td class="mono">${esc(m.id || m.tunnel)}</td>
-        <td class="mono">127.0.0.1:${m.port}</td>
-        <td class="mono">${m.latency_ms != null ? m.latency_ms + " ms" : "—"}</td>
-        <td class="mono">${m.throughput_kb_s != null ? Math.round(m.throughput_kb_s) + " KiB/s" : "—"}</td>
+        <td class="mono" data-label="tunnel">${esc(m.id || m.tunnel)}</td>
+        <td class="mono" data-label="endpoint">127.0.0.1:${m.port}</td>
+        <td class="mono" data-label="latency">${m.latency_ms != null ? m.latency_ms + " ms" : "—"}</td>
+        <td class="mono" data-label="throughput" data-desktop-only>${m.throughput_kb_s != null ? Math.round(m.throughput_kb_s) + " KiB/s" : "—"}</td>
       </tr>`
     )
     .join("");
@@ -667,6 +717,10 @@ async function init() {
   });
   $("#create-form").addEventListener("submit", createTunnel);
   $("#node-filter").addEventListener("submit", (e) => { e.preventDefault(); loadNodes(); });
+  // Server-side ping/downlink sorting: clicking latency/throughput re-queries
+  // /api/nodes with sort=...; clicking the active column clears back to score.
+  $("#th-latency").addEventListener("click", () => toggleNodeSort("latency"));
+  $("#th-throughput").addEventListener("click", () => toggleNodeSort("throughput"));
   $("#modal-close").addEventListener("click", hideModal);
   $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") hideModal(); });
 

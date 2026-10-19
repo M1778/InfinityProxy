@@ -144,6 +144,35 @@ _Avoid_: "the proxy format"
 What a client speaks to a tunnel: SOCKS5 and HTTP (CONNECT), authenticated with
 the tunnel's stable credentials.
 
+**Control center**:
+The optional multi-tenant edge service ([ADR-0012](./docs/adr/0012-multi-tenant-control-center.md))
+on `127.0.0.1:8790` that fronts the Control API for public boards.
+
+**Tenant**:
+A registered operator of the control center: holds one operator key, a credit
+balance, and a private set of leases.
+
+**Operator key**:
+The `user_…` `X-Operator-Key` issued at registration. The key *is* the tenant's
+identity — no IP, header, or body contributes identity, and the board never
+trusts anything else as one.
+
+**Admin key**:
+The `X-Admin-Key` the host operator sets to work the admin surface
+(`/v1/admin/*`). Unset [admin key] = no admin surface (409
+`admin_not_configured`).
+
+**Lease**:
+A tenant-owned Proxy Tunnel, recorded in the control center's
+tenant→tunnel mapping. Lease rows cross the API credential-free
+(`id/host/port/state`) — connecting uses the tunnel's own SOCKS/HTTP
+credentials, the same as with the engine.
+
+**Credit**:
+One unit of wall-clock runtime, debited per full `credit_interval_s` elapsed
+(default one credit per hour). The signup grant and admin grants land in a
+per-tenant **ledger**. Provisioning requires credits ≥ 1.
+
 ## Implementation notes (not domain)
 
 Terms above are domain vocabulary. Implementation decisions and their why-live

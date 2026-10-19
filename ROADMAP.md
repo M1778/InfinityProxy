@@ -35,6 +35,13 @@ interview, and stated no's. Unstated ideas are deliberately not here.
   **Host** view exposes both toggles with a per-tunnel target selector and
   re-measure; hostagent JSON contract is OS-agnostic so a native/Windows agent
   can implement it later.
+- Multi-tenant control center ([ADR-0012](./docs/adr/0012-multi-tenant-control-center.md)):
+  an opt-in `tenancy` service (compose profile `tenancy`, port 8790) fronting
+  the engine for public boards — tenant registration with operator keys
+  (`X-Operator-Key`), tunnel-scoped leases (credential-free rows), credit
+  metering on a per-tenant ledger, admin grant/rotate/disable, and a
+  credential-free public surface (`/v1/public/*`). Engine API and panel stay
+  unauthenticated localhost (ADR-0003/0007).
 - GitHub Pages **demo**: every push rebuilds the current `panel/static` UI plus
   static fixtures into a hosted demo of the dashboard
   (`.github/workflows/pages.yml`, see [docs/dashboard.md](./docs/dashboard.md)).
@@ -54,10 +61,14 @@ during filtering. This sharpens the **geo/diversity** rotation axis into an
 explicit requirement rather than an emergent property.
 
 ### Tunnel-scoped API keys
-Authenticated, remote-capable control API. Each key manages only its own
-tunnels, so the engine can leave localhost and be deployed as a shared service
-without exposing other tenants' tunnels. Resolves the
-[ADR-0003](./docs/adr/0003-localhost-control-api.md) "path forward".
+**Shipped** as the control center ([ADR-0012](docs/adr/0012-multi-tenant-control-center.md)):
+a separate opt-in service (`tenancy`, port 8790) with per-tenant operator
+keys, tunnel-scoped leases, credit metering, and an admin surface. The engine
+Control API itself stays unauthenticated localhost (ADR-0003) — the
+scoped-key surface lives in front of it, so `python -m engine` alone never
+changes posture. Remaining idea *not* covered: keys for panel-originated
+traffic (SSE/redirect flows) and per-request credential rotation (out of
+scope).
 
 ### Interactive dashboard
 **Shipped** — the panel (port 8000) is a full management surface: create, delete,
