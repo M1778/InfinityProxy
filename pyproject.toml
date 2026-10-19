@@ -24,7 +24,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["engine*", "panel*", "hostagent*"]
+include = ["engine*", "panel*", "hostagent*", "tenancy*"]
 
 [tool.ruff]
 line-length = 88

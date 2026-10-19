@@ -56,5 +56,30 @@ services:
       - /dev/net/tun:/dev/net/tun
     restart: unless-stopped
 
+  tenancy:
+    build: .
+    image: infinityproxy-engine
+    network_mode: host
+    command: ["python", "-m", "tenancy"]
+    profiles: ["tenancy"]
+    environment:
+      INFINITY_TENANCY_HOST: ${INFINITY_TENANCY_HOST:-127.0.0.1}
+      INFINITY_TENANCY_PORT: ${INFINITY_TENANCY_PORT:-8790}
+      INFINITY_TENANCY_ENGINE_URL: ${INFINITY_TENANCY_ENGINE_URL:-http://127.0.0.1:8787}
+      INFINITY_TENANCY_DB: /data/tenancy.db
+      INFINITY_TENANCY_ADMIN_KEY: ${INFINITY_TENANCY_ADMIN_KEY:-}
+      INFINITY_TENANCY_TUNNEL_HOST: ${INFINITY_TENANCY_TUNNEL_HOST:-}
+      INFINITY_TENANCY_STARTING_CREDITS: ${INFINITY_TENANCY_STARTING_CREDITS:-720}
+      INFINITY_TENANCY_MAX_TENANTS: ${INFINITY_TENANCY_MAX_TENANTS:-50}
+      INFINITY_TENANCY_MAX_TUNNELS: ${INFINITY_TENANCY_MAX_TUNNELS:-4}
+      INFINITY_TENANCY_MAX_NODES: ${INFINITY_TENANCY_MAX_NODES:-20}
+      INFINITY_TENANCY_CREDIT_INTERVAL_S: ${INFINITY_TENANCY_CREDIT_INTERVAL_S:-3600}
+      INFINITY_TENANCY_METER_ENABLED: ${INFINITY_TENANCY_METER_ENABLED:-1}
+    volumes:
+      - infinity-data:/data
+    depends_on:
+      - engine
+    restart: unless-stopped
+
 volumes:
   infinity-data:

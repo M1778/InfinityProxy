@@ -7,12 +7,17 @@ documented in [dashboard.md](./dashboard.md). Host-wide client features (System
 Proxy, TUN mode) are driven through the privileged **hostagent** at
 `INFINITY_HOSTAGENT_URL` (default `http://127.0.0.1:8788`) — see
 [Host control](#host-control-adr-0010) below and
-[ADR-0010](./adr/0010-hostagent.md).
+[ADR-0010](./adr/0010-hostagent.md). For deployments serving other operators,
+the **control center** (`tenancy` package, `127.0.0.1:8790`) fronts the engine
+with tenant accounts, API keys, tunnel scoping, and credit metering — see
+[Control center](#control-center-adr-0011) below and
+[ADR-0011](./adr/0011-multi-tenant-control-center.md).
 
 > **Security:** in v1 the control API and the panel are bound to localhost and
 > are **unauthenticated by design**. Don't publish them to any network. See
-> [ADR-0003](./adr/0003-localhost-control-api.md). Remote/authenticated control
-> (tunnel-scoped API keys) is on the [roadmap](../ROADMAP.md).
+> [ADR-0003](./adr/0003-localhost-control-api.md). The control center adds
+> tenant-scoped keys *on top of* that posture, as a separate service; the
+> engine surface itself is unchanged.
 
 All request/response bodies are JSON (`Content-Type: application/json`).
 Errors use the shape `{ "error": { "code": "...", "message": "..." } }`.
@@ -388,6 +393,88 @@ Errors: `409` (`host_target_unavailable`) for a missing/stopped tunnel when
 `enabled`; `502` (`host_privilege`) when the host lacks TUN capability;
 `502` (`hostagent_unreachable`).
 
+## Control center (ADR-0011)
+
+The `tenancy` package is the multi-tenant front for the engine, a separate
+Flask service on **`127.0.0.1:8790`** (`python -m tenancy`, compose profile
+`tenancy`). It keeps its own SQLite store (`tenancy.db`); the engine and panel
+are untouched and stay unauthenticated (ADR-0003/0007).
+
+### Key scopes
+
+| Audience | Header | Notes |
+| --- | --- | --- |
+| Visitor | — | `/v1/public/*` and `/health` only |
+| Tenant | `X-Operator-Key` | Key issued at registration. The key **is** the identity: no header/IP/body contributes identity. A live tenant without one is served exactly one 401. |
+| Host operator | `X-Admin-Key` | `INFINITY_TENANCY_ADMIN_KEY`; admin routes answer `409 admin_not_configured` until it is set. |
+
+A "lease" is a tenant-provisioned Proxy Tunnel. Ownership is recorded in a
+`tenant_tunnels` mapping; every listing is filtered through it, and tunnels
+gone from the engine (deleted elsewhere) are unlinked on read. A tenant's
+endpoint and credentials never cross the control center: lease rows carry
+`id/host/port/state` only — connecting uses the tunnel's own credentials,
+obtained the same way as for the engine (the tunnel's SOCKS/HTTP listener
+authenticates clients itself; see the engine session below).
+
+### Tenant surface
+
+| Endpoint | Notes |
+| --- | --- |
+| `POST /v1/tenants/register` | Body `{"title","email","node_count"?}`. Issues a `user_…` operator key, grants `INFINITY_TENANCY_STARTING_CREDITS`, records the signup grant on the ledger. |
+| `GET /v1/me` | Yours: profile (`tenant_id`, `tenant_key`, `title`, `email`, `state`, `node_count_requested`, `created_at`, `credits`, `credited_at`) + scoped, cred-free `leases[]`. |
+| `GET /v1/me/ledger` | Newest-first `{at_s, tenant_id, delta, reason}` entries. |
+| `POST /v1/me/tunnels` | Provisions through the engine (`node_count` clamped to `INFINITY_TENANCY_MAX_NODES`) and links the lease. Gated on credits ≥ 1 and the per-tenant cap. |
+| `DELETE /v1/me/tunnels/{id}` | Engine delete + unlink. A foreign id is `404` — checked before the engine is called at all. |
+| `POST /v1/me/tunnels/{id}/renew` | Engine renewal, mapped through the scope. |
+| `GET /v1/me/proxy-clients` | The panel's observed proxy-client rows from the tenant's leases (when the panel feeds them in via the admin surface below). |
+
+### Admin surface
+
+| Endpoint | Notes |
+| --- | --- |
+| `GET /v1/admin/tenants` | All accounts (`tenant_key` included) + counts. |
+| `POST /v1/admin/tenants` | Manually issue a seeded account (`{"title","email"?}`). |
+| `POST /v1/admin/tenants/{id}/grant` | `{"amount"}` → adds credits + `admin grant` ledger row. |
+| `POST /v1/admin/tenants/{id}/rotate` | New key; the old `X-Operator-Key` becomes `401` immediately. |
+| `POST /v1/admin/tenants/{id}/disable` | Freezes the account (subsequent calls: `403 disabled`) and tears down each of the tenant's leases via the engine. |
+| `GET /v1/admin/proxy-clients` | Recently observed proxy clients per account (the panel maps client rows to tenants). |
+
+### Public surface
+
+| Endpoint | Notes |
+| --- | --- |
+| `GET /health` | Liveness echo. |
+| `GET /v1/public/pool` | The ten public pool fields the panel charts. Engine-only extras do not cross (whitelist + shape). |
+| `GET /v1/public/tunnels` | Active tenants and their leases, endpoint-only (`id/port/state`, no credentials). |
+| `GET /v1/public/stats` | `{tenants, credits_outstanding, metered_since_s}` snapshot. |
+
+### Engine failure passes through
+
+Engine errors surface with their own codes and `502` (`engine_unreachable`
+when the connection fails outright) rather than being swallowed as generic
+500s — the control center is a thin principal, not a cache.
+
+### Example session
+
+```bash
+# sign up
+TEN=$(curl -s -X POST http://127.0.0.1:8790/v1/tenants/register \
+  -d '{"title":"acme","email":"ops@acme.co"}')
+KEY=$(echo "$TEN" | python3 -c "import sys,json;print(json.load(sys.stdin)['tenant_key'])")
+
+# provision a tunnel on your credits
+curl -s -X POST http://127.0.0.1:8790/v1/me/tunnels \
+  -H "X-Operator-Key: $KEY" -d '{}'
+
+# your leases (endpoint-only; credentials live with the tunnel itself)
+curl -s http://127.0.0.1:8790/v1/me -H "X-Operator-Key: $KEY"
+
+# teardown
+curl -s -X DELETE "http://127.0.0.1:8790/v1/me/tunnels/$(
+  echo '{"id":"tu_abcd"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])"
+)" -H "X-Operator-Key: $KEY"
+```
+
 ## Configuration
 
 All overridable via environment variables (defaults in brackets).
@@ -433,6 +520,25 @@ All overridable via environment variables (defaults in brackets).
 | `INFINITY_HOST_PICK_TIMEOUT_S` | `8.0` | Per-candidate measurement cap |
 | `INFINITY_DB` | `infinity.db` | SQLite file path |
 
+Control center settings (`INFINITY_TENANCY_*`, ADR-0011):
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `INFINITY_TENANCY_HOST` | `127.0.0.1` | Control center bind address (public boards must set this deliberately) |
+| `INFINITY_TENANCY_PORT` | `8790` | Control center bind port |
+| `INFINITY_TENANCY_ENGINE_URL` | `http://127.0.0.1:8787` | Control center → engine base URL |
+| `INFINITY_TENANCY_DB` | `tenancy.db` | Control center SQLite path (separate from `INFINITY_DB`) |
+| `INFINITY_TENANCY_ADMIN_KEY` | — |Admin key for `/v1/admin/*`; unset = admin routes answer `409 admin_not_configured` |
+| `INFINITY_TENANCY_PAGE_TITLE` | `InfinityProxy control center` | Title the board advertises on its index |
+| `INFINITY_TENANCY_TUNNEL_HOST` | — | Host advertised to tenants for connecting to leases (default: whatever `shaped_tunnels` reflects from the engine) |
+| `INFINITY_TENANCY_STARTING_CREDITS` | `720` | Signup grant (30 days at one credit per hour) |
+| `INFINITY_TENANCY_MAX_TENANTS` | `50` | Registration cap; signups beyond answer `503 board_full` |
+| `INFINITY_TENANCY_MAX_TUNNELS` | `4` | Per-tenant lease cap; provisioning beyond answers `409 lease_limit` |
+| `INFINITY_TENANCY_MAX_NODES` | `20` | Per-tunnel node-count ceiling for tenant requests (clamped, not rejected) |
+| `INFINITY_TENANCY_CREDIT_INTERVAL_S` | `3600` | Wall-clock seconds one credit covers; `0` disables metering |
+| `INFINITY_TENANCY_METER_ENABLED` | `1` | Metering on/off. Off = provisioning stays credit-free |
+| `INFINITY_TENANCY_LEDGER_KEEP` | `50` | Ledger rows kept per tenant |
+
 Source cadences are per-source (see [docs/scraping.md](./scraping.md#source-manifest)).
 
 ## Error codes
@@ -452,6 +558,19 @@ Source cadences are per-source (see [docs/scraping.md](./scraping.md#source-mani
 | `host_target_unavailable` | 409 | The requested target tunnel is missing/stopped, or no tunnel is running for `"auto"` |
 | `host_unsupported` | 409 | Host capability missing for the operation (e.g. `proxy` on a host with no detected desktop) |
 | `host_privilege` | 502 | TUN mode is impossible on this host (no `/dev/net/tun`, no privilege) |
+
+Control center error codes (ADR-0011):
+
+| Code | HTTP | Meaning |
+| --- | --- | --- |
+| `missing_key` | 401 | `X-Operator-Key` absent |
+| `invalid_key` | 401 | Unknown key (or a rejected admin key) |
+| `disabled` | 403 | Tenant disabled by the host operator |
+| `admin_not_configured` | 409 | `/v1/admin/*` on a board without `INFINITY_TENANCY_ADMIN_KEY` |
+| `out_of_credits` | 402 | Provisioning while below one credit |
+| `board_full` | 503 | Registration at `INFINITY_TENANCY_MAX_TENANTS` |
+| `lease_limit` | 409 | Provisioning at `INFINITY_TENANCY_MAX_TUNNELS` |
+| `engine_unreachable` | 502 | Engine request failed outright (timeout/refused) |
 
 ## Example session
 

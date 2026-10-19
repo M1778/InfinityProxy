@@ -120,6 +120,25 @@ curl -s -X DELETE http://127.0.0.1:8787/tunnels/tu_8f3k9a
 > in this guide with buttons (create/test/renew/delete tunnels, refresh
 > sources, browse nodes). Don't publish either port to the network.
 
+### Hosting for others (control center)
+
+To open the stack to other operators — signups with their own API keys,
+private tunnels on their own credits — enable the optional control center
+([ADR-0011](./docs/adr/0011-multi-tenant-control-center.md)):
+
+```bash
+INFINITY_TENANCY_ADMIN_KEY=choose-a-secret \
+docker compose --profile tenancy up -d
+```
+
+It fronts the engine on `127.0.0.1:8790`: tenants register at
+`POST /v1/tenants/register`, receive an `X-Operator-Key`, and provision
+tunnels against their credit balance; every lease row crossing it is
+credential-free. The engine API and panel keep their localhost posture — the
+control center is the only network-facing (when you choose to expose it)
+surface, and it carries keys. See
+[docs/api.md#control-center](./docs/api.md#control-center-adr-0011).
+
 ## Configuration
 
 Everything is overridable via environment variables (see

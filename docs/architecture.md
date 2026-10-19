@@ -134,6 +134,28 @@ measure every running tunnel's egress (latency through the tunnel proxy, then a
 download-throughput sample), pick the best latency, tie-break by throughput, and
 cache the result for `INFINITY_HOST_PICK_TTL_S` (default 60s).
 
+### The control center (multi-tenant edge)
+
+**Third, opt-in** front for deployments serving other operators
+([ADR-0011](./adr/0011-multi-tenant-control-center.md)): `tenancy/`, run via
+`python -m tenancy` on its own loopback listener `127.0.0.1:8790`.
+It keeps its own SQLite store (`tenancy.db` — tenants, ledger, the
+tenant→tunnel mapping) separate from the engine's pool file, and calls the
+engine as the board's single local principal — the engine Control API itself
+gains nothing and stays unauthenticated (ADR-0003).
+
+| Service | Address | Env | Default |
+| --- | --- | --- | --- |
+| Control center | `127.0.0.1:8790` | `INFINITY_TENANCY_PORT` | `8790` |
+
+Three key scopes: the tenant's `X-Operator-Key` (identity is *only* the key),
+the host operator's `X-Admin-Key` (`INFINITY_TENANCY_ADMIN_KEY`; unset board =
+no admin surface), and the unauthenticated `/v1/public/*` metrics view.
+Lease ownership is a mapping table, every lease row crossing the API is
+credential-free (`id/host/port/state`), and credits meter wall-clock runtime
+per tenant ledger. Deployment rides compose profile `tenancy`; a default
+stack never starts it. Endpoints and configuration: docs/api.md#control-center-adr-0011.
+
 ### SQLite store
 
 A single SQLite file (default `infinity.db`) on a Docker volume persists:
@@ -307,6 +329,10 @@ The Engine never queues or blocks a create request on the pool.
   [ADR-0007](./adr/0007-web-panel.md) and [docs/dashboard.md](./dashboard.md).
 - Hostagent control API: `127.0.0.1:8788`, same localhost-only rule — the
   privileged host-control surface (opt-in, see [ADR-0010](./adr/0010-hostagent.md)).
+- Control center: `127.0.0.1:8790` (opt-in, `--profile tenancy`) — the
+  multi-tenant edge with its own key scopes and credit metering, calling the
+  engine as a local principal; see [ADR-0011](./adr/0011-multi-tenant-control-center.md)
+  and [docs/api.md](./api.md#control-center-adr-0011).
 - Mind that your public network is not published to Docker by default (see
   [CONTRIBUTING.md](../CONTRIBUTING.md)).
 - Tunnels: one published port each, from `INFINITY_TUNNEL_RANGE`. Each tunnel
@@ -336,6 +362,12 @@ InfinityProxy/
 │   ├── app.py                #   loopback control API (:8788)
 │   ├── platform.py           #   capabilities, gsettings/KDE proxy setter
 │   └── singbox.py            #   TUN sing-box config renderer
+├── tenancy/                  # multi-tenant control center (ADR-0011)
+│   ├── app.py                #   key scopes, leases, credits (:8790)
+│   ├── engine.py             #   engine edge + credential-free projections
+│   ├── store.py              #   tenants, ledger, tenant→tunnel mapping
+│   ├── billing.py            #   wall-clock credit metering
+│   └── models.py             #   Tenant / LedgerEntry dataclasses
 ├── demo/                     # GitHub Pages demo bootstrap (static fixtures)
 ├── tunnel-image/             # Docker image wrapping sing-box for tunnels
 ├── tools/                    # benchmark harness
@@ -359,3 +391,4 @@ Relevant architecture decision records:
 - [0008 Throughput-certified pool](./adr/0008-throughput-certified-pool.md)
 - [0009 Stability-scored assignment](./adr/0009-stability-scored-assignment.md)
 - [0010 Host system proxy + TUN via hostagent](./adr/0010-hostagent.md)
+- [0011 Multi-tenant control center](./adr/0011-multi-tenant-control-center.md)

@@ -24,7 +24,7 @@ change must update the docs/ADRs in the same change.
 | `docs/api.md` | Control API endpoints, payloads, errors, env config table |
 | `docs/scraping.md` | Source manifest, fetch loop, dedup, liveness filter, attribution |
 | `docs/dashboard.md` | Panel architecture: SSE, charts, port layout |
-| `docs/adr/` | 10 accepted decisions (0001–0010: per-tunnel containers, SQLite, localhost API, MIT+attribution, urltest rotation, relay-grade liveness, web panel, throughput-certified pool, stability-scored assignment, hostagent) |
+| `docs/adr/` | 11 accepted decisions (0001–0011: per-tunnel containers, SQLite, localhost API, MIT+attribution, urltest rotation, relay-grade liveness, web panel, throughput-certified pool, stability-scored assignment, hostagent, multi-tenant control center) |
 | `docs/benchmark.md` | Real-stack benchmark harness results: first 10-minute run findings |
 | `ROADMAP.md` | v1 surface + post-v1 ambitions and stated no's |
 | `CONTRIBUTING.md` | Build, test, CI, and contribution conventions |
