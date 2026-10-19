@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives.ciphers.aead import (
     ChaCha20Poly1305,
 )
 
-from engine.filter.probe import ThroughputSpec
+from engine.filter.probe import ThroughputSpec, _clear_dial_memo_for_tests
 from engine.filter.probe import probe as real_probe
 from engine.filter.runner import batch_probe
 from engine.models import Node, ProbeResult
@@ -29,6 +29,16 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 FAKE_UUID = "00000000-0000-0000-0000-000000000001"
 _TLS_ALERT = b"\x15\x03\x03\x00\x02\x02\x28"
 _HTTP_200 = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_dial_memo():
+    # The dial-failure memo is module-global; OS ports are recycled between
+    # tests on loopback, so a memoized refusal from one test must never leak
+    # into the next test's port.
+    _clear_dial_memo_for_tests()
+    yield
+    _clear_dial_memo_for_tests()
 
 
 def make_node(node_id: str, port: int, protocol: str = "vless") -> Node:
@@ -260,6 +270,46 @@ class VlessBodyServer:
             pass
         finally:
             conn.close()
+
+    def close(self) -> None:
+        self._stop.set()
+        self.sock.close()
+
+
+class DripServer:
+    """Sends 1 byte every `interval_s`, far slower than the probe deadline.
+
+    GUARANTEES the old per-recv-timeout behavior would stretch a 0.5s probe to
+    6+ seconds: each `recv` re-arms `settimeout` as if no time had elapsed,
+    while an absolute deadline view of the handshake refuses past the probe
+    window.
+    """
+
+    def __init__(self, interval_s: float = 0.25) -> None:
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port = self.sock.getsockname()[1]
+        self._interval = interval_s
+        self._stop = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._drip, args=(conn,), daemon=True).start()
+
+    def _drip(self, conn: socket.socket) -> None:
+        with conn:
+            while not self._stop.is_set():
+                try:
+                    conn.sendall(b"\x00")
+                except OSError:
+                    return
+                if self._stop.wait(self._interval):
+                    return
 
     def close(self) -> None:
         self._stop.set()
@@ -672,6 +722,37 @@ def test_probe_dead_on_closed_port() -> None:
     assert result.latency_ms is not None
 
 
+def test_dial_memo_short_circuits_repeat_refused_endpoint() -> None:
+    # Same endpoint failing twice: the second dial is refused instantly from
+    # the memo, not by a second TCP SYN timeout — one dead endpoint listed ten
+    # times in a feed pays the dial once per memo window.
+    port = RefusedPort()
+    try:
+        first = real_probe(make_node("d1", port.port, "vless"), timeout_s=2.0)
+        second = real_probe(make_node("d2", port.port, "vless"), timeout_s=2.0)
+        third = real_probe(make_node("d3", port.port, "ss"), timeout_s=2.0)
+    finally:
+        port.close()
+    assert first.alive is False and second.alive is False and third.alive is False
+    assert second.latency_ms is not None and second.latency_ms <= first.latency_ms
+    assert "memoized" in (second.error or "") or "memoized" in (third.error or "")
+
+
+def test_dial_memo_never_hides_a_listening_endpoint() -> None:
+    # The memo records connect failures only. A live listener (even a silent
+    # one that will time out later in the handshake) is never memoized —
+    # liveness past TCP depends on the URI, so it must keep being probed.
+    server = SilentServer()
+    try:
+        first = real_probe(make_node("s1", server.port, "vless"), timeout_s=0.3)
+        assert first.error == "timeout"
+        second = real_probe(make_node("s2", server.port, "vless"), timeout_s=0.3)
+    finally:
+        server.close()
+    assert second.alive is False
+    assert second.error == "timeout"
+
+
 def test_probe_dead_with_timeout_on_silent_listener() -> None:
     server = SilentServer()
     try:
@@ -681,6 +762,22 @@ def test_probe_dead_with_timeout_on_silent_listener() -> None:
     assert result.alive is False
     assert result.error == "timeout"
     assert result.latency_ms is not None and result.latency_ms >= 200
+
+
+def test_probe_deadline_survives_slow_drip_responder() -> None:
+    # A peer trickling one byte per window re-arms a per-recv timeout forever;
+    # the handshake read is bounded by the probe's absolute deadline instead.
+    server = DripServer(interval_s=0.25)
+    try:
+        result = real_probe(make_node("drip", server.port, "vless"), timeout_s=0.6)
+    finally:
+        server.close()
+    assert result.alive is False
+    assert result.error == "timeout"
+    assert result.latency_ms is not None
+    # Without the deadline the probe would still be waiting through
+    # len(sent) = 34 recv windows (~8.5s); the deadline caps it near 0.6s.
+    assert result.latency_ms < 2000
 
 
 def test_probe_vless_alive_on_relay_emulator() -> None:

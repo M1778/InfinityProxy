@@ -80,6 +80,25 @@ Trade-offs, intentionally accepted and visible in the docs:
   Benchmarked 0/74 across two ws-populated tunnels before this guard.
   The gate covers every probeable protocol: `_transport()` reads the
   vless/trojan `?type=` and the vmess base64 payload's `net` field.
+- **Handshake reads are deadline-bounded, not timeout-bounded.**
+  `socket.settimeout` is per operation: a peer dribbling one byte per window
+  re-arms it forever and turns a 4s handshake into N×4s, stretching the whole
+  probe batch. Every handshake read loop (`_recvn`, `_read_until`) re-arms
+  each `recv` with what is actually left of the probe's absolute deadline, so
+  a slow-drip responder dies as a plain timeout at the probe budget regardless
+  of how it delivers bytes. The throughput body readers keep their
+  sample-window semantics: a slow node may keep reading to the wall of its
+  own 12s window and simply measure low, which is the ADR-0008 measurement,
+  not a liveness failure.
+- **Failed dials are memoized, endpoint-wide, for 30 seconds.** A TCP-level
+  connection failure is endpoint state, not URI state: feeds routinely list
+  the same dead endpoint under vless/ss/trojan, and without the memo each
+  variant re-pays a full dial wait inside the same batch. The memo absents a
+  `(host, port)` that failed within the last 30s and covers
+  `ConnectionRefusedError`/`OSError` dials only — a listener that accepts
+  (even a silent one) is never memoized, because liveness past TCP depends on
+  the URI. Entries are capped so unique dead endpoints cannot grow the memo
+  without bound.
 
 ## Consequences
 

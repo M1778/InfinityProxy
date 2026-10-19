@@ -125,12 +125,20 @@ until re-probed. The survival schema details live in
 [architecture.md](./architecture.md#sqlite-store).
 
 - Candidates queue through the filter in batches of 50; each node has 4s to
-  complete a handshake.
+  complete a handshake — an absolute deadline, re-checked on every read
+  (`settimeout` alone lets a one-byte-at-a-time peer re-arm it forever). A
+  TCP-level dial failure is memoized endpoint-wide (`host`, `port`) for 30s,
+  so the same dead endpoint listed under several protocol URIs in one batch
+  pays the dial wait once, not per variant; listeners that accept are never
+  memoized.
 - Each source refresh probes at most `INFINITY_PROBE_BUDGET_PER_REFRESH`
-  untested nodes, oldest-scraped first, plus a bounded dead-retest sample of
-  the refresh's own source. The pass never drains the whole untested queue in
+  untested nodes, oldest-scraped first, plus `INFINITY_DEAD_RETEST_BUDGET`
+  (default 200) already-dead nodes of the refresh's own source, also
+  oldest-scraped first. The pass never drains the whole untested queue in
   one refresh, so a single flooded feed cannot stall every other source's
-  cadence; probes advance FIFO across refreshes instead.
+  cadence; probes advance FIFO across refreshes instead — including the dead
+  slice, so slow-failing (timeout) nodes re-test at the same pace as
+  fast-refusing ones instead of starving behind them.
 - Every batch verdict is written to the store as soon as it completes, so
   `alive` nodes surface incrementally while a large pass still runs — the pool
   is never held back until the full queue drains.
