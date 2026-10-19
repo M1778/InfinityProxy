@@ -65,12 +65,14 @@ class Node:
     last_latency_ms: int | None = None
     state: str = "untested"
     throughput_kb_s: int | None = None
+    throughput_measured_s: float | None = None
     probe_ok: int = 0
     probe_total: int = 0
     window_started_s: float | None = None
     last_probe_s: float | None = None
     last_alive_s: float | None = None
     score_f: float | None = None
+    last_error: str | None = None
 
     @classmethod
     def from_candidate(cls, c: NodeCandidate) -> "Node":
@@ -85,6 +87,19 @@ class Node:
             source=c.source,
             first_seen_s=time.time(),
         )
+
+    def as_insert_row(self) -> dict[str, object]:
+        """Named tuple for the nodes-table upsert (named-parameter INSERT)."""
+        return {
+            "node_id": self.node_id,
+            "uri": self.uri,
+            "protocol": self.protocol,
+            "server": self.server,
+            "port": self.port,
+            "user": self.user,
+            "source": self.source,
+            "first_seen_s": self.first_seen_s,
+        }
 
     @property
     def identity_key(self) -> str:

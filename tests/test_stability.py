@@ -5,6 +5,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import time
+
 import pytest
 
 from engine.models import Node
@@ -137,3 +139,26 @@ def test_score_nodes_orders_within_tier_a_by_composite() -> None:
         weight_speed=0.4,
     )
     assert [n.node_id for n in ordered] == ["better", "faster"]
+
+
+def test_speed_percentile_decays_stale_measurement() -> None:
+    # A measurement stamped outside the freshness horizon ranks as if the node
+    # were never measured; a fresh measurement ranks normally.
+    stale = make_node("stale", throughput_kb_s=9000)
+    stale.throughput_measured_s = 1.0
+    fresh = make_node("fresh", throughput_kb_s=500)
+    fresh.throughput_measured_s = 1.0 + 60_000.0
+    now = 1.0 + 100_000.0
+    pct = speed_percentile_map([fresh, stale], now=now, max_age_s=60_000.0)
+    assert "stale" not in pct
+    assert pct["fresh"] == 1.0
+
+
+def test_speed_percentile_undated_measurement_defaults_to_fresh() -> None:
+    # Rows written before the stamp column exist keep ranking; the decay keys
+    # off the stamp once a throughput value carries one.
+    undated = make_node("undated", throughput_kb_s=500)
+    pct = speed_percentile_map(
+        [undated], now=time.time() + 1_000_000.0, max_age_s=100.0
+    )
+    assert pct["undated"] == 1.0

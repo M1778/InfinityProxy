@@ -59,6 +59,11 @@ curl -s http://127.0.0.1:8787/status
 }
 ```
 
+The response is cached for **1s** and carries a weak `ETag`; a poller that
+repeats the same digest gets an empty **304** instead of a fresh body. The
+panel's 5s poll and the bench harness both funnel through this — repeat calls
+within a second cost no SQL, and unchanged bodies cost no serialization.
+
 | Field | Meaning |
 | --- | --- |
 | `pool.total` | Nodes currently tracked in the pool |
@@ -99,7 +104,7 @@ curl -s "http://127.0.0.1:8787/nodes?state=alive&protocol=ss&q=5.6.7&limit=50&in
 | `in_use` | `1`/`true` — only assigned nodes; `0`/`false` — only unassigned |
 | `q` | Substring match on server address or node id |
 | `limit` | Max rows, 1–1000, default 200 |
-| `sort` | `score` — stability order (Tier A, then B, then cold); `400` when the feature is off |
+| `sort` | `score` — stability order (Tier A, then B, then cold); `latency` — increasing probe latency, untested last; `throughput` — decreasing measured speed, unmeasured last; `400` when `sort=score` is requested while the feature is off |
 | `min_tier` | `A` — only Tier A nodes; `B` — Tier A and B (cold excluded); `400` when off or invalid |
 
 ```json
@@ -114,6 +119,7 @@ curl -s "http://127.0.0.1:8787/nodes?state=alive&protocol=ss&q=5.6.7&limit=50&in
       "state": "alive",
       "last_latency_ms": 45,
       "throughput_kb_s": 812,
+      "last_error": null,
       "in_use": false,
       "first_seen_s": "2026-09-07T02:00:00Z",
       "probe_total": 312,
@@ -131,9 +137,13 @@ curl -s "http://127.0.0.1:8787/nodes?state=alive&protocol=ss&q=5.6.7&limit=50&in
 but `tier`/`score` are `null` while the stability feature is off.
 `availability` is the Wilson lower bound over `probe_total` verdicts; `score`
 additionally blends the throughput percentile within the node's protocol
-(ADR-0009). A node is Tier A only while its verdicts are fresh (within
-`INFINITY_STABILITY_MAX_AGE_S`); aged nodes report Tier B until the working-set
-loop re-probes them.
+(ADR-0009). `last_error` carries the latest handshakes' failure text: an alive
+verdict clears it, a dead verdict writes it. A node is Tier A only while its
+verdicts are fresh (within `INFINITY_STABILITY_MAX_AGE_S`); aged nodes report
+Tier B until the working-set loop re-probes them. The speed term decays on the
+same horizon: a `throughput_kb_s` measured longer ago than
+`INFINITY_STABILITY_MAX_AGE_S` stops anchoring the percentile until a fresh
+download re-stamps it.
 
 **Errors:** `400` on non-integer or out-of-range `limit`, on `sort=score` or
 `min_tier` while the feature is off, and on an invalid `min_tier`.
@@ -235,6 +245,10 @@ curl -s http://127.0.0.1:8787/tunnels
   ]
 }
 ```
+
+`dead_swapped_24h` and `restarts_24h` are rolling 24h windows of timestamped
+events, pruned on write and on read — an entry that happened 25h ago stops
+counting without needing a midnight reset or an engine restart.
 
 ### `POST /tunnels/{id}/renew` — force renewal
 
@@ -384,6 +398,7 @@ All overridable via environment variables (defaults in brackets).
 | `INFINITY_BATCH_SIZE` | `50` | Concurrent liveness probes per batch |
 | `INFINITY_PROBE_TIMEOUT_MS` | `4000` | Per-node handshake timeout |
 | `INFINITY_PROBE_BUDGET_PER_REFRESH` | `5000` | Untested nodes probed per source refresh |
+| `INFINITY_DEAD_RETEST_BUDGET` | `200` | Already-dead nodes re-tested FIFO per source refresh, in addition to the untested budget |
 | `INFINITY_HEALTH_INTERVAL_S` | `30` | Per-tunnel health-check interval |
 | `INFINITY_MAX_MISSES` | `2` | Consecutive failures before a node is swapped |
 | `INFINITY_URTEST_INTERVAL_S` | `30` | Per-tunnel sing-box `urltest` health-check cadence; the rotator re-probes its nodes at this rate and excludes dead ones from selection (clamped to ≥ 10s, sing-box's minimum) |

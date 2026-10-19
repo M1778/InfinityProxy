@@ -117,6 +117,20 @@ def test_status_ok(client):
     assert body["tunnels"]["active"] == 0
 
 
+def test_status_etag_304(client):
+    test, store, _ = client
+    first = test.get("/status")
+    etag = first.headers["ETag"]
+
+    again = test.get("/status", headers={"If-None-Match": etag})
+    assert again.status_code == 304
+    assert again.data == b""
+
+    different = test.get("/status", headers={"If-None-Match": 'W/"deadbeef"'})
+    assert different.status_code == 200
+    assert different.headers["ETag"] == etag
+
+
 def test_create_tunnel_degraded_on_empty_pool(client):
     test, store, controller = client
     res = test.post("/tunnels", json={"node_count": 10, "auto_renew": True})

@@ -52,14 +52,32 @@ def is_fresh(node: Node, now: float, max_age_s: float) -> bool:
     return node.last_probe_s is not None and now - node.last_probe_s <= max_age_s
 
 
-def speed_percentile_map(nodes: Sequence[Node]) -> dict[str, float]:
+def speed_percentile_map(
+    nodes: Sequence[Node],
+    *,
+    now: float | None = None,
+    max_age_s: float | None = None,
+) -> dict[str, float]:
     """Percentile rank (0..1) of each measured node within its protocol.
 
     Protocols are ranked separately because their feed scales differ; a lone
     measured member ranks 1.0, the slowest member ranks 0.0, and a node with no
-    measured throughput gets no entry (callers default it to 0.0).
+    measured throughput gets no entry (callers default it to 0.0). With a
+    freshness horizon, a measurement older than max_age_s counts as unmeasured:
+    admission numbers are a single 1 MiB sample, so a stale one must not anchor
+    the speed term for days (ADR-0008 COALESCE keeps the value, this decay
+    bounds how long it can rank).
     """
     by_protocol: dict[str, list[Node]] = defaultdict(list)
+    if max_age_s is not None:
+        now = time.time() if now is None else now
+        nodes = [
+            n
+            for n in nodes
+            if n.throughput_kb_s is None
+            or n.throughput_measured_s is None
+            or now - n.throughput_measured_s <= max_age_s
+        ]
     for node in nodes:
         by_protocol[node.protocol].append(node)
     out: dict[str, float] = {}
@@ -135,7 +153,7 @@ def score_nodes(
 ) -> list[Node]:
     """Order candidates for admission: Tier A, then Tier B, then cold, each
     by composite score descending (tested latency as the final tiebreak)."""
-    percentiles = speed_percentile_map(nodes)
+    percentiles = speed_percentile_map(nodes, now=now, max_age_s=max_age_s)
 
     def _key(node: Node) -> tuple[int, float, int]:
         node_tier = tier(

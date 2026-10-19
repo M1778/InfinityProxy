@@ -783,3 +783,57 @@ def test_pool_counts_freshness_gate_ages_verdicts_out_of_tier_a(store: Store) ->
     aged = store.pool_counts(min_probes=6, min_avail=0.4, max_age_s=3600)
     assert aged["tier_a"] == 1  # 1.1.1.1 only
     assert aged["tier_b"] == 2  # 2.2.2.2 (low avail) + 3.3.3.3 (stale after aging)
+
+
+def test_apply_probe_results_records_last_error(store: Store) -> None:
+    store.upsert_candidates([make_candidate(source="a")])
+    node = store.load_nodes()[0]
+    store.apply_probe_results(
+        {node.node_id: ProbeResult(node.node_id, False, error="timeout")}
+    )
+    assert store.get_node(node.node_id).last_error == "timeout"
+
+    store.apply_probe_results(
+        {node.node_id: ProbeResult(node.node_id, False, error="refused")}
+    )
+    assert store.get_node(node.node_id).last_error == "refused"
+
+    # An alive verdict clears the error; a later handshake-only pass with no
+    # error must keep the row clean instead of writing None over it.
+    store.apply_probe_results({node.node_id: ProbeResult(node.node_id, True)})
+    assert store.get_node(node.node_id).last_error is None
+    store.apply_probe_results(
+        {node.node_id: ProbeResult(node.node_id, True, latency_ms=30)}
+    )
+    assert store.get_node(node.node_id).last_error is None
+
+
+def test_dead_retest_fifo_and_budget(tmp_path) -> None:
+    from engine.config import Settings
+
+    store = Store(str(tmp_path / "fifo.db"))
+    store.create_schema()
+    try:
+        older_first = [
+            make_candidate(source="a", server=f"1.0.0.{i}", port=443) for i in range(6)
+        ]
+        store.upsert_candidates(older_first)
+        for i, node in enumerate(store.load_nodes()):
+            store._conn.execute(
+                "UPDATE nodes SET state = 'dead', last_latency_ms = ?, "
+                "first_seen_s = ? WHERE node_id = ?",
+                (
+                    i * 10,
+                    i,
+                    node.node_id,
+                ),
+            )
+        store._conn.commit()
+
+        settings = Settings(dead_retest_budget=3)
+        batch = store.load_nodes(
+            state="dead", limit=settings.dead_retest_budget, oldest_first=True
+        )
+        assert [n.server for n in batch] == ["1.0.0.0", "1.0.0.1", "1.0.0.2"]
+    finally:
+        store.close()
