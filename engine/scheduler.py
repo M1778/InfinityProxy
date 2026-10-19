@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from typing import Any
 
 from engine.assigner import Assigner
@@ -45,13 +46,14 @@ class Engine:
         self._lock = threading.Lock()
         self._strikes: dict[tuple[str, str], int] = {}
         self._rendered: dict[str, tuple[tuple[str, ...], dict[str, Any]]] = {}
-        self._swapped_24h: dict[str, int] = {}
-        self._restarted_24h: dict[str, int] = {}
+        self._swapped_24h: dict[str, deque[float]] = {}
+        self._restarted_24h: dict[str, deque[float]] = {}
         self._last_check: dict[str, float] = {}
         self._threads: list[threading.Thread] = []
         self._started_s = time.time()
         self._refreshing: set[str] = set()
         self._refresh_lock = threading.Lock()
+        self._health_busy: set[str] = set()
         self._last_working_set_s: float | None = None
 
     def start(self) -> None:
@@ -75,6 +77,22 @@ class Engine:
         self._stop.set()
         for thread in self._threads:
             thread.join(timeout=5)
+
+    def forget_tunnel(self, tunnel_id: str) -> None:
+        """Drop all per-tunnel runtime bookkeeping after the row is deleted.
+
+        Strikes and the rendered-config signature must not survive a delete:
+        a recreated tunnel reusing the id would otherwise inherit the dead
+        one's miss counts and skip its first redeploy.
+        """
+        with self._lock:
+            for entry in [k for k in self._strikes if k[0] == tunnel_id]:
+                self._strikes.pop(entry, None)
+            self._health_busy.discard(tunnel_id)
+            self._rendered.pop(tunnel_id, None)
+        self._last_check.pop(tunnel_id, None)
+        self._swapped_24h.pop(tunnel_id, None)
+        self._restarted_24h.pop(tunnel_id, None)
 
     def reconcile(self) -> None:
         """Boot reconciliation: adopt live tunnels, reap orphans, mark running.
@@ -131,11 +149,26 @@ class Engine:
                 self._refreshing.discard(name)
 
     def health_check(self, tunnel: Tunnel) -> tuple[int, int]:
-        """One health pass for a tunnel. Returns (swapped, added)."""
-        with self._lock:
-            return self._health_check_locked(tunnel)
+        """One health pass for a tunnel. Returns (swapped, added).
 
-    def _health_check_locked(self, tunnel: Tunnel) -> tuple[int, int]:
+        Probes run without the engine lock: a full assigned set takes seconds
+        per node, and holding the lock that long blocks every renew request
+        behind it. The lock guards only strike bookkeeping and the per-tunnel
+        counters. A pass already in flight for this tunnel makes another call
+        a no-op instead of probing the same nodes twice in parallel.
+        """
+        tunnel_id = tunnel.tunnel_id
+        with self._lock:
+            if tunnel_id in self._health_busy:
+                return 0, 0
+            self._health_busy.add(tunnel_id)
+        try:
+            return self._run_health_pass(tunnel)
+        finally:
+            with self._lock:
+                self._health_busy.discard(tunnel_id)
+
+    def _run_health_pass(self, tunnel: Tunnel) -> tuple[int, int]:
         tunnel_id = tunnel.tunnel_id
         self._last_check[tunnel_id] = time.time()
         assigned = [
@@ -146,8 +179,7 @@ class Engine:
             )
             if n is not None
         ]
-        swapped = added = 0
-        changed = False
+        swapped = 0
 
         if assigned:
             results = batch_probe(
@@ -165,42 +197,35 @@ class Engine:
                 )
             else:
                 self.store.apply_probe_results(results)
-            for node in assigned:
-                key = (tunnel_id, node.node_id)
-                if results[node.node_id].alive:
-                    self._strikes.pop(key, None)
-                    continue
-                self._strikes[key] = self._strikes.get(key, 0) + 1
-                if self._strikes[key] < self.settings.max_misses:
-                    continue
-                self._strikes.pop(key, None)
-                self.store.unassign_node(node.node_id)
-                self._bump_granted(tunnel_id, -1)
-                self._swapped_24h[tunnel_id] = self._swapped_24h.get(tunnel_id, 0) + 1
-                swapped += 1
-                changed = True
-
-        fresh = self.store.get_tunnel(tunnel_id)
-        if fresh is None:
-            return 0, 0
-        if swapped or fresh.degraded:
-            added = len(
-                self.assigner.top_up(
-                    self.store,
-                    tunnel_id,
-                    fresh.node_count_requested,
-                    protocols=set(ASSIGNABLE_PROTOCOLS),
-                )
-            )
-            if added:
-                self._bump_granted(tunnel_id, added)
-                changed = True
-
-        if changed:
+            with self._lock:
+                swapped = self._apply_health_verdicts(tunnel, assigned, results)
+        added = self._after_provision(tunnel_id)
+        if self._change_marker(tunnel_id) or swapped or added:
+            self._clear_change_marker(tunnel_id)
             self._redeploy(tunnel_id)
-
         self._self_heal(tunnel_id)
         return swapped, added
+
+    def _apply_health_verdicts(
+        self, tunnel: Tunnel, assigned: list, results: dict
+    ) -> int:
+        """Strike bookkeeping under the lock: count dead nodes and swap them."""
+        tunnel_id = tunnel.tunnel_id
+        swapped = 0
+        for node in assigned:
+            key = (tunnel_id, node.node_id)
+            if results[node.node_id].alive:
+                self._strikes.pop(key, None)
+                continue
+            self._strikes[key] = self._strikes.get(key, 0) + 1
+            if self._strikes[key] < self.settings.max_misses:
+                continue
+            self._strikes.pop(key, None)
+            self.store.unassign_node(node.node_id)
+            self._bump_granted(tunnel_id, -1)
+            self._record_event(self._swapped_24h, tunnel_id)
+            swapped += 1
+        return swapped
 
     def _self_heal(self, tunnel_id: str) -> None:
         """Redeploy a tunnel whose container stopped running but whose row is live.
@@ -223,7 +248,7 @@ class Engine:
             return
         logger.warning("tunnel %s container not running; redeploying", tunnel_id)
         if self._redeploy(tunnel_id):
-            self._restarted_24h[tunnel_id] = self._restarted_24h.get(tunnel_id, 0) + 1
+            self._record_event(self._restarted_24h, tunnel_id)
 
     def _bump_granted(self, tunnel_id: str, delta: int) -> None:
         tunnel = self.store.get_tunnel(tunnel_id)
@@ -376,14 +401,7 @@ class Engine:
                 stale += 1
             elif now - float(last) > source.cadence_s * 2:
                 stale += 1
-        in_use = self.store.node_ids_in_use()
-        assignable = sum(
-            1
-            for n in self.store.load_nodes(
-                state="alive", protocols=set(ASSIGNABLE_PROTOCOLS)
-            )
-            if n.node_id not in in_use
-        )
+        assignable = self.store.assignable_count(set(ASSIGNABLE_PROTOCOLS))
         return {
             "engine": "ok",
             "uptime_s": int(now - self._started_s),
@@ -422,10 +440,40 @@ class Engine:
             "stale_sources": stale,
         }
 
+    def _record_event(self, events: dict[str, deque[float]], tunnel_id: str) -> None:
+        """Timestamp a swap/restart event and drop entries outside the 24h window.
+
+        Only `_apply_health_verdicts` and `_self_heal` ever write these, and each
+        writes a different dict, so the lock those callers already hold is the
+        memory guard; a deque also caps churn — entries expire on read so the
+        counters genuinely restart counting every day instead of growing forever
+        like the previous ever-rising ints (whose only reset was an engine
+        restart, which zeroes them entirely and lies the other way).
+        """
+        now = time.time()
+        window = events.setdefault(tunnel_id, deque())
+        window.append(now)
+        horizon = now - 86400
+        while window and window[0] < horizon:
+            window.popleft()
+
+    def _events_in_window(self, events: dict[str, deque[float]], tunnel_id: str) -> int:
+        window = events.get(tunnel_id)
+        if not window:
+            return 0
+        horizon = time.time() - 86400
+        while window and window[0] < horizon:
+            window.popleft()
+        return len(window)
+
     def tunnel_health(self, tunnel: Tunnel) -> dict[str, Any]:
         last = self._last_check.get(tunnel.tunnel_id)
         return {
             "last_check_s": int(time.time() - last) if last else None,
-            "dead_swapped_24h": self._swapped_24h.get(tunnel.tunnel_id, 0),
-            "restarts_24h": self._restarted_24h.get(tunnel.tunnel_id, 0),
+            "dead_swapped_24h": self._events_in_window(
+                self._swapped_24h, tunnel.tunnel_id
+            ),
+            "restarts_24h": self._events_in_window(
+                self._restarted_24h, tunnel.tunnel_id
+            ),
         }

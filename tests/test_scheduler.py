@@ -1,6 +1,8 @@
 """Offline tests for engine.scheduler boot reconcile. No docker, no network."""
 
 import sys
+import time
+from collections import deque
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -100,6 +102,7 @@ class StatusStore(FakeStore):
         self._nodes = nodes
         self._in_use = in_use
         self.in_use_calls = 0
+        self.assignable_calls = 0
 
     def sources_summary(self) -> list[dict]:  # type: ignore[no-untyped-def]
         return []
@@ -127,6 +130,10 @@ class StatusStore(FakeStore):
         self.in_use_calls += 1
         return set(self._in_use)
 
+    def assignable_count(self, protocols: set[str]) -> int:
+        self.assignable_calls += 1
+        return sum(1 for n in self._nodes if n.node_id not in self._in_use)
+
 
 def test_engine_status_resolves_assignments_with_one_store_query():
     store = StatusStore(
@@ -137,4 +144,39 @@ def test_engine_status_resolves_assignments_with_one_store_query():
     status = engine.engine_status()
 
     assert status["pool"]["assignable"] == 2
-    assert store.in_use_calls == 1
+    assert store.assignable_calls == 1
+    assert store.in_use_calls == 0
+
+
+def test_tunnel_health_counts_roll_out_of_24h_window():
+    store = FakeStore()
+    engine = make_engine(store)
+
+    now = time.time()
+    stale_window = engine._swapped_24h.setdefault("tu_1", deque())
+    stale_window.append(now - 86401)
+    fresh_window = deque([now - 3600, now])
+    engine._restarted_24h["tu_1"] = fresh_window
+
+    health = engine.tunnel_health(make_tunnel("tu_1", state="running"))
+
+    assert health["dead_swapped_24h"] == 0
+    assert health["restarts_24h"] == 2
+    # The pruned deque stays pruned, so the stale entry never comes back.
+    assert engine._swapped_24h["tu_1"] == deque()
+
+
+def test_record_event_prunes_on_write():
+    store = FakeStore()
+    engine = make_engine(store)
+
+    old = time.time() - 90000
+    engine._swapped_24h["tu_2"] = deque([old])
+    engine._record_event(engine._swapped_24h, "tu_2")
+    engine._record_event(engine._swapped_24h, "tu_2")
+
+    assert len(engine._swapped_24h["tu_2"]) == 2
+    assert (
+        engine.tunnel_health(make_tunnel("tu_2", state="running"))["dead_swapped_24h"]
+        == 2
+    )
