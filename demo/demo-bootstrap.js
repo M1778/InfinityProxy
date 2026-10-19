@@ -69,6 +69,29 @@
     };
   }
 
+  function applyPillModeBoot() {
+    const mq = window.matchMedia("(max-width: 560px)");
+    const setMode = () => {
+      document.body.dataset.pillMode = mq.matches ? "collapsed" : "expanded";
+      const t = document.querySelector("#pill-toggle");
+      if (t) t.setAttribute("aria-expanded", mq.matches ? "false" : "true");
+    };
+    setMode();
+    if (mq.addEventListener) mq.addEventListener("change", setMode);
+    const toggle = document.querySelector("#pill-toggle");
+    if (toggle) {
+      toggle.addEventListener("click", () => {
+        const expanded = document.body.dataset.pillMode === "expanded";
+        document.body.dataset.pillMode = expanded ? "collapsed" : "expanded";
+        toggle.setAttribute("aria-expanded", String(!expanded));
+      });
+    }
+  }
+
+  /* The static build has no server to confirm liveness, so the apps pill
+     reflects the demo rather than the engine. */
+  window.__demoPillBoot = applyPillModeBoot;
+
   function pool() {
     let alive = 0, untested = 0, dead = 0;
     for (const [, a, u, d] of PROTOCOLS) { alive += a; untested += u; dead += d; }
@@ -173,13 +196,12 @@
       tunnels: running.map((t) => {
         const m = host.lastLatency[t.id] || {};
         return {
-          tunnel: t.id,
+          id: t.id,
           host: "127.0.0.1",
           port: t.port,
           username: t.username,
           latency_ms: m.latency_ms != null ? m.latency_ms : null,
           throughput_kb_s: m.throughput_kb_s != null ? m.throughput_kb_s : null,
-          measured_at_s: m.at_s ?? null,
         };
       }),
       pick: host.pick,
@@ -404,4 +426,14 @@
   }
 
   window.EventSource = FakeEventSource;
+
+  /* The panel app hides the pill behind a toggle under 560px, and inits on
+     script load — so the demo mirrors its state machine before app.js runs
+     and re-applies it after, since app.js renders rows without data-labels
+     when their sources are stubbed. */
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => window.__demoPillBoot && window.__demoPillBoot());
+  } else {
+    window.__demoPillBoot && window.__demoPillBoot();
+  }
 })();

@@ -318,7 +318,7 @@ state, the candidate tunnels with their last measurements, and the cached pick.
 | `proxy` | Current System Proxy state (`{enabled, tunnel, endpoint}`) |
 | `tun` | Current TUN state (`{enabled, iface, tunnel, endpoint}`) |
 | `tunnels[]` | Running tunnels with `{id, host, port, username, latency_ms, throughput_kb_s}` (latency/throughput `null` until measured) |
-| `pick` | Last auto-pick result `{tunnel, latency_ms, throughput_kb_s, cached, stale_in_s}` |
+| `pick` | Last auto-pick result `{tunnel, latency_ms, throughput_kb_s, cached, stale_in_s}`; after a fresh pass it also carries `measurements[]` — one `{tunnel, port, username, latency_ms, throughput_kb_s}` row per candidate (the same list the host table renders) |
 
 ```json
 {
@@ -345,7 +345,13 @@ curl -s -X POST http://127.0.0.1:8787/host/pick
 ```
 
 ```json
-{ "tunnel": "tu_8f3k9a", "latency_ms": 45, "throughput_kb_s": 812, "cached": false }
+{
+  "tunnel": "tu_8f3k9a", "latency_ms": 45, "throughput_kb_s": 812, "cached": false,
+  "measurements": [
+    { "tunnel": "tu_8f3k9a", "port": 10244, "username": "u_5x2m", "latency_ms": 45, "throughput_kb_s": 812 },
+    { "tunnel": "tu_9b1c2d", "port": 10456, "username": "u_4p8r", "latency_ms": 210, "throughput_kb_s": 344 }
+  ]
+}
 ```
 
 Errors: `409` (`host_target_unavailable`) when no tunnel is running to measure;

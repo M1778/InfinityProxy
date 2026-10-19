@@ -68,6 +68,46 @@ nodes table carries **availability**, **score**, and **tier** columns. All of
 these come from fields the engine already reports on `GET /status` and
 `GET /nodes`; the panel adds no opinion about the numbers.
 
+## Responsive layout
+
+One light theme, no `.app-dark` variant; the frontend holds two breakpoints
+instead of a framework:
+
+- **≤760px** — tablet/desktop transition: the overview chart grid drops to one
+  column, `.chart-card.wide` stops spanning two columns, and the tab bar strips
+  its text labels (`.tablabel` hidden), leaving icon-only tabs with
+  `aria-label`/`aria-current` still carrying the names.
+- **≤560px** — phone pass: root font drops to 14px, the topbar wraps with
+  `.tabs` flexed to a full row under the brand (brand text, `brand-sub` hidden)
+  with horizontal scroll (`overflow-x: auto`, scrollbars hidden via
+  `scrollbar-width: none`), stat cards re-grid to two columns, chart canvases
+  clamp (`#pool-chart` 220px, `#proto-chart` 240px), inline forms stack
+  (`label.check` checkboxes opt out of the two-column field grid and keep the
+  text beside the box), primary buttons go full-width (44px targets), modals
+  anchor to the bottom edge, and toasts stretch edge-to-edge.
+- **Connection pill** — under 560px the pill starts collapsed
+  (`data-pill-mode="collapsed"` on `body`) and shows only the colored dot;
+  `#pill-toggle` (a dot-only button next to it, `aria-expanded` reflecting the
+  mode) re-expands it. `setPillMode()` only re-imposes the collapsed default
+  when connectivity flips, so an explicit toggle survives every snapshot.
+- **`#page-title` bar** — only visible on the phone pass; the hash router
+  writes the current view's capitalized name (`route()` in `app.js`) so the
+  hidden `tablabel` doesn't lose the context.
+- **Card-collapse tables** — below 560px, table `thead` is hidden and every row
+  renders as a card: each `td` gets `td::before { content: attr(data-label) }`
+  from the `data-label` attribute the renderers emit, and columns the phones
+  don't need sit on `th/td[data-desktop-only]` and vanish (e.g. nodes keeps
+  id/protocol/server/state on handsets while latency/throughput/avail/score/tier
+  stay desktop-only). `.row-actions` cells break the card grid: a full-width
+  unlabeled footer row (dashed top border) so Copy/Test/Renew/Delete and source
+  Refresh stay reachable on touch — no action can end up `data-desktop-only`.
+- **Touch** — `@media (hover: none) and (pointer: coarse)` lifts `.btn` to
+  40px targets; `prefers-reduced-motion` kills all pulses and transitions.
+
+The GitHub Pages demo shares this pass: `demo/demo-bootstrap.js` re-applies the
+pill mode on boot (`window.__demoPillBoot`) because it boots before app.js and
+stubbed sources would otherwise render rows without `data-label`s.
+
 ## Host view (ADR-0010)
 
 A **Host** tab operates the Docker host's own traffic through a tunnel, driven
