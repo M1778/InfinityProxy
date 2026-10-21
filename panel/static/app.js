@@ -15,16 +15,15 @@ const state = {
   host: null,           // last /api/host result
   hostError: null,
   nodeSort: null,       // "latency" | "throughput" | null (score default)
-  lastSnapAt: 0,
+  fallbackTimer: null,
+  fallbackInFlight: false,
   panels: { pool: null, tunnel: null, proto: null, donut: null },
 };
 
 /* ---------- connection pill ---------- */
 
 function applyPillMode(snap, connectivityChanged) {
-  if (!connectivityChanged && !window.matchMedia("(max-width: 560px)").matches) {
-    return;
-  }
+  if (!connectivityChanged) return;
   if (window.matchMedia("(max-width: 560px)").matches) {
     setPillMode("collapsed");
   } else {
@@ -38,17 +37,19 @@ function setPillMode(mode) {
 }
 
 function bindPillToggle() {
+  const mq = window.matchMedia("(max-width: 560px)");
+  const syncMode = () => setPillMode(mq.matches ? "collapsed" : "expanded");
+  syncMode();
+  if (mq.addEventListener) mq.addEventListener("change", syncMode);
   $("#pill-toggle").addEventListener("click", () => {
     const expanded = document.body.dataset.pillMode === "expanded";
     setPillMode(expanded ? "collapsed" : "expanded");
-    $("#pill-toggle").setAttribute("aria-expanded", String(!expanded));
   });
 }
 
 function onSnap(snap) {
   const wasLive = state.snap && state.snap.reachable;
   state.snap = snap;
-  state.lastSnapAt = Date.now();
   setPill(snap.reachable ? "live" : "error");
   applyPillMode(snap, wasLive !== snap.reachable);
   renderOverview();
@@ -60,9 +61,15 @@ function onSnap(snap) {
 function connectSSE() {
   bindPillToggle();
   const es = new EventSource("/api/events");
-  es.addEventListener("snapshot", (e) => onSnap(JSON.parse(e.data)));
-  es.addEventListener("heartbeat", () => { /* keeps the connection warm */ });
-  es.onopen = () => setPill("live");
+  es.addEventListener("snapshot", (e) => {
+    stopFallbackPoll();
+    onSnap(JSON.parse(e.data));
+  });
+  es.addEventListener("heartbeat", stopFallbackPoll);
+  es.onopen = () => {
+    stopFallbackPoll();
+    setPill(snap_reachable() ? "live" : "error");
+  };
   es.onerror = () => {
     setPill("reconnecting");
     // Native EventSource auto-reconnects; fall back to polling while down.
@@ -74,12 +81,22 @@ function snap_reachable() {
   return !!(state.snap && state.snap.reachable);
 }
 
-function scheduleFallbackPoll() {
+function stopFallbackPoll() {
   window.clearInterval(state.fallbackTimer);
+  state.fallbackTimer = null;
+}
+
+function scheduleFallbackPoll() {
+  if (state.fallbackTimer !== null) return;
   state.fallbackTimer = window.setInterval(async () => {
-    if (Date.now() - state.lastSnapAt > 12000) {
+    if (state.fallbackInFlight) return;
+    state.fallbackInFlight = true;
+    try {
       const snap = await api("/api/snapshot", { silent: true }).catch(() => null);
-      if (snap) onSnap(snap);
+      // A late HTTP answer must not overwrite a recovered stream's snapshot.
+      if (snap && state.fallbackTimer !== null) onSnap(snap);
+    } finally {
+      state.fallbackInFlight = false;
     }
   }, 5000);
 }

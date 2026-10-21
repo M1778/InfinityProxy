@@ -16,7 +16,10 @@ the same rule for metrics.
 
 from __future__ import annotations
 
+import logging
+import math
 import secrets
+import sqlite3
 import time
 from typing import Any
 
@@ -25,7 +28,7 @@ from flask import Flask, jsonify, request
 from tenancy import billing
 from tenancy.config import TenancySettings
 from tenancy.engine import EngineEdge, EngineSideError, read_pool, shaped_tunnels
-from tenancy.models import LedgerEntry, Tenant
+from tenancy.models import Tenant
 from tenancy.store import TenantsStore
 
 PROXY_CLIENT_COLUMNS = (
@@ -68,6 +71,7 @@ def create_app(
     # Per-connection client identity. Local panel/dev processes seed items, a
     # far-end tenant never can — the map is board state, not request data.
     known_clients: dict[tuple[str, str], str] = proxy_clients if proxy_clients else {}
+    logger = logging.getLogger("infinityproxy-control-center")
 
     app = Flask("infinityproxy-control-center")
     app.json.ensure_ascii = False
@@ -93,6 +97,9 @@ def create_app(
         row["leases"] = leases
         return row
 
+    def metering_enabled() -> bool:
+        return settings.meter_enabled and settings.credit_interval_s > 0
+
     def auth_tenant() -> tuple[Tenant | None, dict[str, Any] | None]:
         header = request.headers.get("X-Operator-Key", "")
         if not header:
@@ -102,7 +109,16 @@ def create_app(
             return None, err("invalid_key", "unknown operator key", 401)
         if tenant.state != "active":
             return None, err("disabled", "operator key disabled", 403)
-        billing.drain_elapsed(store, tenant, settings.credit_interval_s)
+        if metering_enabled():
+            billing.drain_elapsed(
+                store, tenant, settings.credit_interval_s, keep=settings.ledger_keep
+            )
+        # Revalidate after the meter transaction: disable/rotate can race lookup.
+        tenant = store.get_by_key(header)
+        if tenant is None:
+            return None, err("invalid_key", "unknown operator key", 401)
+        if tenant.state != "active":
+            return None, err("disabled", "operator key disabled", 403)
         return tenant, None
 
     def auth_admin() -> dict[str, Any] | None:
@@ -120,6 +136,12 @@ def create_app(
         ip, conn = entry
         return {"ip": ip, "connection_id": conn, "key_id": known_clients[entry]}
 
+    def shaped_for_tenant(payload: Any, scope: set[str]) -> list[dict[str, str]]:
+        shaped = shaped_tunnels(payload, scope)
+        if settings.public_tunnel_host:
+            shaped = [{**row, "host": settings.public_tunnel_host} for row in shaped]
+        return shaped
+
     def tunnels_for_tenant(tenant_id: str) -> list[dict[str, Any]]:
         """The tenant's leases, projected without credentials (ADR-0012).
 
@@ -131,7 +153,7 @@ def create_app(
         if not scope:
             return []
         payload = engine.tunnels()
-        shaped = shaped_tunnels(payload, scope)
+        shaped = shaped_for_tenant(payload, scope)
         for tunnel_id in scope - {row["id"] for row in shaped}:
             store.unlink_tunnel(tenant_id, tunnel_id)
         return shaped
@@ -175,16 +197,13 @@ def create_app(
 
     @app.get("/v1/public/stats")
     def public_stats():
-        drain_all = [
-            billing.drain_elapsed(store, t, settings.credit_interval_s, _now())
-            for t in store.load_tenants()
-        ]
+        """Read-only rollup. Metering never runs here: this route is
+        unauthenticated, so per-GET writes would let anyone churn the ledger."""
         return jsonify(
             {
                 "tenants": store.active_count(),
                 "credits_outstanding": round(store.total_credits(), 4),
                 "metered_since_s": settings.credit_interval_s,
-                "last_drain": round(sum(drain_all), 4),
             }
         )
 
@@ -213,7 +232,9 @@ def create_app(
             title=title, email=email, node_count_requested=node_count
         )
         store.save_tenant(tenant)
-        billing.grant_starting(store, tenant, settings.starting_credits, _now())
+        billing.grant_starting(
+            store, tenant, settings.starting_credits, _now(), keep=settings.ledger_keep
+        )
         return jsonify(tenant_keys(tenant)), 201
 
     @app.get("/v1/me")
@@ -233,7 +254,14 @@ def create_app(
         if failure is not None:
             return failure
         return jsonify(
-            {"ledger": [entry.__dict__ for entry in store.ledger(tenant.tenant_id)]}
+            {
+                "ledger": [
+                    entry.__dict__
+                    for entry in store.ledger(
+                        tenant.tenant_id, keep=settings.ledger_keep
+                    )
+                ]
+            }
         )
 
     @app.post("/v1/me/tunnels")
@@ -247,22 +275,66 @@ def create_app(
         except (TypeError, ValueError):
             return err("invalid_request", "node_count must be an integer", 400)
         node_count = max(1, min(settings.max_nodes_per_tunnel, node_count))
-        if tenant.credits < 1.0:
+        if metering_enabled() and tenant.credits < 1.0:
             return err("out_of_credits", "operator credit balance exhausted", 402)
         try:
-            tunnels = tunnels_for_tenant(tenant.tenant_id)
+            tunnels_for_tenant(tenant.tenant_id)
         except EngineSideError as exc:
             return err(exc.code, exc.message, 502)
-        if len(tunnels) >= settings.max_tunnels_per_tenant:
+        reservation = store.reserve_tunnel(
+            tenant.tenant_id,
+            settings.max_tunnels_per_tenant,
+            min_credits=1.0 if metering_enabled() else 0.0,
+        )
+        if reservation is None:
+            fresh = store.get_tenant(tenant.tenant_id)
+            if fresh is None or fresh.state != "active":
+                return err("disabled", "operator key disabled", 403)
+            if metering_enabled() and fresh.credits < 1.0:
+                return err("out_of_credits", "operator credit balance exhausted", 402)
             return err("lease_limit", "tunnel cap reached", 409)
+        release_slot = True
+        tunnel_id = None
         try:
+            # Timeout/malformed success can hide a completed engine creation.
+            # Keep uncertain slots counted until the host reconciles them.
+            release_slot = False
             payload = engine.create_tunnel(node_count, auto_renew=True)
+            tunnel_id = payload.get("id") if isinstance(payload, dict) else None
+            if not tunnel_id:
+                return err("engine_error", "engine returned no tunnel row", 502)
+            tunnel_id = str(tunnel_id)
+            store.note_reservation_tunnel(reservation, tunnel_id)
+            active = store.complete_reservation(
+                tenant.tenant_id, reservation, tunnel_id
+            )
+            release_slot = True
+            if not active:
+                try:
+                    engine.delete_tunnel(tunnel_id)
+                    store.unlink_tunnel(tenant.tenant_id, tunnel_id)
+                except EngineSideError:
+                    logger.warning("disabled tenant cleanup pending for %s", tunnel_id)
+                return err("disabled", "operator disabled during provisioning", 403)
+            shaped = shaped_for_tenant({"tunnels": [payload]}, {tunnel_id})
+            return jsonify(shaped[0]), 201
         except EngineSideError as exc:
+            release_slot = 400 <= exc.status < 500
             return err(exc.code, exc.message, 502)
-        tunnel_id = payload.get("id") if isinstance(payload, dict) else None
-        if tunnel_id:
-            store.link_tunnel(tenant.tenant_id, str(tunnel_id))
-        return jsonify(payload), 201
+        except sqlite3.Error:
+            logger.exception("lease finalization failed for %s", tunnel_id)
+            if tunnel_id:
+                try:
+                    engine.delete_tunnel(tunnel_id)
+                    release_slot = True
+                except EngineSideError as exc:
+                    release_slot = exc.status == 404
+            return err(
+                "lease_finalize_failed", "lease ownership could not be saved", 502
+            )
+        finally:
+            if release_slot:
+                store.release_reservation(reservation)
 
     @app.delete("/v1/me/tunnels/<tunnel_id>")
     def delete_tenant_tunnel(tunnel_id: str):
@@ -337,7 +409,9 @@ def create_app(
             node_count_requested=4,
         )
         store.save_tenant(tenant)
-        billing.grant_starting(store, tenant, settings.starting_credits, _now())
+        billing.grant_starting(
+            store, tenant, settings.starting_credits, _now(), keep=settings.ledger_keep
+        )
         return jsonify(tenant_keys(tenant)), 201
 
     @app.post("/v1/admin/tenants/<tenant_id>/grant")
@@ -353,13 +427,12 @@ def create_app(
             amount = float(body.get("amount", 0))
         except (TypeError, ValueError):
             return err("invalid_request", "amount must be a number", 400)
-        if amount <= 0:
-            return err("invalid_request", "amount must be positive", 400)
-        store.grant(tenant_id, amount, _now())
-        store.record(
-            LedgerEntry(tenant_id=tenant_id, delta=amount, reason="admin grant")
-        )
-        store.prune_ledger(tenant_id, settings.ledger_keep)
+        if not math.isfinite(amount) or amount <= 0:
+            return err("invalid_request", "amount must be positive and finite", 400)
+        try:
+            store.grant(tenant_id, amount, _now(), keep=settings.ledger_keep)
+        except ValueError as exc:
+            return err("invalid_request", str(exc), 400)
         return jsonify({"tenant": tenant_keys(store.get_tenant(tenant_id))}), 200
 
     @app.post("/v1/admin/tenants/<tenant_id>/rotate")
@@ -370,10 +443,8 @@ def create_app(
         tenant = store.get_tenant(tenant_id)
         if tenant is None:
             return err("not_found", f"no tenant {tenant_id}", 404)
-        tenant.tenant_key = f"user_{secrets.token_urlsafe(18)}"
-        tenant.updated_at_s = _now()
-        store.save_tenant(tenant)
-        return jsonify({"tenant": tenant_keys(tenant)}), 200
+        store.set_key(tenant_id, f"user_{secrets.token_urlsafe(18)}", _now())
+        return jsonify({"tenant": tenant_keys(store.get_tenant(tenant_id))}), 200
 
     @app.post("/v1/admin/tenants/<tenant_id>/disable")
     def admin_disable(tenant_id: str):
@@ -383,12 +454,24 @@ def create_app(
         tenant = store.get_tenant(tenant_id)
         if tenant is None:
             return err("not_found", f"no tenant {tenant_id}", 404)
-        tenant.state = "disabled"
-        tenant.updated_at_s = _now()
-        store.save_tenant(tenant)
-        for tunnel in tunnels_for_tenant(tenant.tenant_id):
-            engine.delete_tunnel(tunnel["id"])
-        return jsonify({"tenant": tenant_keys(tenant)}), 200
+        store.disable(tenant_id, _now())
+        # Delete from the durable ownership mapping, not an engine listing that
+        # may fail. Keep failed ids linked so repeating disable retries them.
+        pending: list[str] = []
+        for tunnel_id in store.tunnels_of(tenant_id):
+            try:
+                engine.delete_tunnel(tunnel_id)
+            except EngineSideError as exc:
+                if exc.status != 404:
+                    pending.append(tunnel_id)
+                    continue
+            store.unlink_tunnel(tenant_id, tunnel_id)
+        return jsonify(
+            {
+                "tenant": tenant_keys(store.get_tenant(tenant_id)),
+                "cleanup_pending": pending,
+            }
+        ), 200
 
     @app.get("/v1/admin/proxy-clients")
     def admin_proxy_clients():
@@ -404,10 +487,12 @@ def create_app(
         return jsonify(
             {
                 "service": "infinityproxy-control-center",
+                "title": settings.tenant_page_title,
                 "tenants": "/v1/tenants/register",
                 "operator": "/v1/me",
                 "admin": "/v1/admin/tenants",
                 "public": "/v1/public/pool",
+                "stats": "/v1/public/stats",
             }
         )
 

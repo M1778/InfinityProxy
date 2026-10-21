@@ -171,6 +171,26 @@ def test_renew_keeps_credentials_stable(client, monkeypatch):
         assert after[key] == before[key]
 
 
+@pytest.mark.parametrize("runtime", [False, True])
+def test_renew_failure_is_json_502(client, monkeypatch, runtime):
+    from engine.tunnel.container import TunnelRuntimeUnavailable
+
+    test, _, _ = client
+    engine = app_engine(test)
+    tunnel = test.post("/tunnels", json={}).get_json()
+
+    def fail(_tunnel):
+        error = TunnelRuntimeUnavailable if runtime else RuntimeError
+        raise error("private internal details")
+
+    monkeypatch.setattr(engine, "health_check", fail)
+    res = test.post(f"/tunnels/{tunnel['id']}/renew")
+    assert res.status_code == 502
+    expected = "docker_unreachable" if runtime else "renew_failed"
+    assert res.get_json()["error"]["code"] == expected
+    assert b"private internal details" not in res.data
+
+
 def test_create_tunnel_unrenderable_nodes_cleans_up(client):
     from engine.models import NodeCandidate, ProbeResult
 

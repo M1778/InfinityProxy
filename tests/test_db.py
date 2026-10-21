@@ -243,6 +243,47 @@ def test_uri_change_resets_state_for_gate_rejudgement(store: Store) -> None:
     assert len(store.load_nodes(state="untested")) == 1
 
 
+def test_uri_change_voids_every_stored_verdict_column(store: Store) -> None:
+    store.upsert_candidates([make_candidate(source="a")])
+    node = store.load_nodes()[0]
+    result = ProbeResult(node.node_id, alive=True, latency_ms=88, throughput_kb_s=640)
+    store.apply_probe_results({node.node_id: result}, stability=True, window_s=3600)
+    alive = store.load_nodes(state="alive")[0]
+    assert alive.throughput_kb_s is not None
+    assert alive.probe_ok >= 1
+    assert alive.score_f is not None
+    store.upsert_candidates([make_candidate(source="a")])
+    assert store.load_nodes()[0] == alive
+    store.apply_probe_results(
+        {node.node_id: ProbeResult(node.node_id, alive=False, error="old verdict")}
+    )
+    assert store.load_nodes()[0].last_error == "old verdict"
+
+    store.upsert_candidates(
+        [make_candidate(source="a", uri="vless://abc@1.2.3.4:443?type=grpc#y")]
+    )
+    row = store.load_nodes()[0]
+    assert row.state == "untested"
+    for column in (
+        "last_latency_ms",
+        "throughput_kb_s",
+        "throughput_measured_s",
+        "window_started_s",
+        "last_probe_s",
+        "last_alive_s",
+        "score_f",
+        "last_error",
+    ):
+        assert getattr(row, column) is None, column
+    assert row.probe_ok == 0
+    assert row.probe_total == 0
+
+    store.upsert_candidates(
+        [make_candidate(source="a", uri="vless://abc@1.2.3.4:443?type=grpc#y")]
+    )
+    assert store.load_nodes()[0] == row
+
+
 def test_load_node_filters(store: Store) -> None:
     store.upsert_candidates(
         [

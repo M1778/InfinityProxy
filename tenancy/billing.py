@@ -1,4 +1,4 @@
-"""Credit metering (ADR-0012): walls-clock billing against tenant credits."""
+"""Credit metering (ADR-0012): wall-clock billing against tenant credits."""
 
 from __future__ import annotations
 
@@ -13,35 +13,19 @@ def drain_elapsed(
     tenant: Tenant,
     credit_interval_s: int,
     now: float | None = None,
+    keep: int = 50,
 ) -> float:
-    """Debit wall-clock credits the tenant earned since last touch.
+    """Charge each full period once and refresh the caller's balance.
 
-    A live tenant accrues `credit_interval_s` per period; passing the period
-    boundary moves `credited_s` forward. Returns the debit (>= 0). Exit state:
-    the tenant's `renewed_at` stays None except when the credit run forces an
-    implicit refresh; callers own the engine-facing bookkeeping.
+    The store reads current credits and commits the tick, actual debit and
+    shortfall ledger together; a stale caller cannot erase a concurrent grant.
     """
     if now is None:
         now = time.time()
-    if tenant.state != "active" or credit_interval_s <= 0 or tenant.credited_s is None:
-        return 0.0
-    elapsed = now - tenant.credited_s
-    if elapsed < credit_interval_s:
-        return 0.0
-    periods = int(elapsed // credit_interval_s)
-    debit = float(periods)
-    tenant.credits = max(0.0, tenant.credits - debit)
-    tenant.credited_s = tenant.credited_s + periods * credit_interval_s
-    store.save_tenant(tenant)
-    store.record(
-        LedgerEntry(
-            tenant_id=tenant.tenant_id,
-            delta=-debit,
-            reason=f"{periods * credit_interval_s // 3600}h metered",
-            at_s=now,
-        )
-    )
-    return debit
+    row, actual = store.drain(tenant.tenant_id, credit_interval_s, now, keep)
+    if row is not None:
+        tenant.__dict__.update(row.__dict__)
+    return actual
 
 
 def grant_starting(
@@ -49,6 +33,7 @@ def grant_starting(
     tenant: Tenant,
     starting_credits: float,
     now: float | None = None,
+    keep: int = 50,
 ) -> None:
     if now is None:
         now = time.time()
@@ -63,3 +48,4 @@ def grant_starting(
             at_s=now,
         )
     )
+    store.prune_ledger(tenant.tenant_id, keep)

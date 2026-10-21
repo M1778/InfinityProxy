@@ -3,13 +3,14 @@
 import sys
 import time
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from engine.assigner import Assigner
 from engine.config import Settings
-from engine.models import Node, Tunnel
+from engine.models import Node, ProbeResult, Tunnel
 from engine.scheduler import Engine
 
 
@@ -233,3 +234,146 @@ def test_self_heal_redeploys_running_tunnel_without_container():
     engine._self_heal("tu_live")
 
     assert controller.updated == ["tu_live"]
+
+
+class TopUpStore(HealStore):
+    """HealStore plus the queries a top-up needs to grant fresh nodes."""
+
+    def __init__(self, tunnel: Tunnel, nodes: list[Node]) -> None:
+        super().__init__(tunnel, nodes[0])
+        self._nodes = {n.node_id: n for n in nodes}
+
+    def assignable_count(self, protocols: set[str]) -> int:
+        return sum(
+            1
+            for n in self._nodes.values()
+            if n.protocol in protocols and n.node_id not in self._assignment
+        )
+
+    def load_nodes(self, state=None, protocols=None) -> list[Node]:  # type: ignore[no-untyped-def]  # noqa: ANN001
+        return [
+            n
+            for n in self._nodes.values()
+            if (state is None or n.state == state)
+            and (protocols is None or n.protocol in protocols)
+        ]
+
+    def node_ids_in_use(self) -> list[str]:
+        return list(self._assignment)
+
+    def assign_nodes(self, node_ids: list[str], tunnel_id: str) -> None:
+        for node_id in node_ids:
+            self._assignment[node_id] = tunnel_id
+
+    def apply_probe_results(self, results, **kw) -> None:  # noqa: ANN001
+        for node_id, result in results.items():
+            self._nodes[node_id].state = "alive" if result.alive else "dead"
+
+    def unassign_node(self, node_id: str) -> None:
+        self._assignment.pop(node_id, None)
+
+    def node_ids_assigned_to(self, tunnel_id: str) -> list[str]:
+        return [nid for nid, owner in self._assignment.items() if owner == tunnel_id]
+
+
+def test_health_check_tops_up_degraded_tunnel(monkeypatch) -> None:
+    tunnel = make_tunnel("tu_degraded", state="running")
+    tunnel.node_count_granted = 1
+    tunnel.node_count_requested = 2
+    store = TopUpStore(
+        tunnel, [_alive_node("n1"), _alive_node("n2"), _alive_node("n3")]
+    )
+    controller = HealController(running=True)
+    settings = replace(Settings(), stability_enabled=True)
+    engine = Engine(settings, store, Assigner(settings), controller)
+    monkeypatch.setattr(
+        "engine.scheduler.batch_probe",
+        lambda nodes, **kw: {n.node_id: _probe_alive(n.node_id) for n in nodes},
+    )
+
+    swapped, added = engine.health_check(tunnel)
+
+    assert swapped == 0
+    assert added == 1
+    assert set(store.node_ids_assigned_to("tu_degraded")) == {"n1", "n2"}
+    assert tunnel.node_count_granted == 2
+    assert controller.updated == ["tu_degraded"]
+    assert engine._rendered["tu_degraded"][0] == ("n1", "n2")
+
+
+def _probe_alive(node_id: str) -> ProbeResult:
+    return ProbeResult(node_id=node_id, alive=True)
+
+
+def test_health_pass_healthy_tunnel_is_noop(monkeypatch):
+    tunnel = make_tunnel("tu_healthy", state="running")
+    tunnel.node_count_requested = tunnel.node_count_granted = 1
+    store = TopUpStore(tunnel, [_alive_node("n1")])
+    controller = HealController(running=True)
+    engine = Engine(Settings(), store, Assigner(Settings()), controller)
+    monkeypatch.setattr(
+        "engine.scheduler.batch_probe",
+        lambda nodes, **kw: {
+            n.node_id: ProbeResult(n.node_id, alive=True) for n in nodes
+        },
+    )
+    assert engine.health_check(tunnel) == (0, 0)
+    assert controller.updated == []
+    assert engine._health_busy == set()
+
+
+def test_health_pass_redeploys_after_dead_removal_without_replacement(monkeypatch):
+    tunnel = make_tunnel("tu_partial", state="running")
+    tunnel.node_count_requested = tunnel.node_count_granted = 2
+    store = TopUpStore(tunnel, [_alive_node("n1"), _alive_node("n2")])
+    store.assign_nodes(["n2"], tunnel.tunnel_id)
+    controller = HealController(running=True)
+    engine = Engine(Settings(), store, Assigner(Settings()), controller)
+    monkeypatch.setattr(
+        "engine.scheduler.batch_probe",
+        lambda nodes, **kw: {
+            n.node_id: ProbeResult(n.node_id, alive=n.node_id == "n1") for n in nodes
+        },
+    )
+    assert engine.health_check(tunnel) == (0, 0)
+    assert engine.health_check(tunnel) == (1, 0)
+    assert controller.updated == ["tu_partial"]
+    assert engine._rendered[tunnel.tunnel_id][0] == ("n1",)
+    assert tunnel.node_count_granted == 1
+
+
+def test_health_pass_replaces_dead_node_and_preserves_credentials(monkeypatch):
+    tunnel = make_tunnel("tu_replace", state="running")
+    tunnel.node_count_requested = tunnel.node_count_granted = 1
+    tunnel.port, tunnel.username, tunnel.password = 12345, "u", "p"
+    store = TopUpStore(tunnel, [_alive_node("n1"), _alive_node("n2")])
+    controller = HealController(running=True)
+    engine = Engine(Settings(), store, Assigner(Settings()), controller)
+    monkeypatch.setattr(
+        "engine.scheduler.batch_probe",
+        lambda nodes, **kw: {
+            n.node_id: ProbeResult(n.node_id, alive=False) for n in nodes
+        },
+    )
+    assert engine.health_check(tunnel) == (0, 0)
+    assert engine.health_check(tunnel) == (1, 1)
+    assert store.node_ids_assigned_to(tunnel.tunnel_id) == ["n2"]
+    assert controller.updated == ["tu_replace"]
+    assert (tunnel.port, tunnel.username, tunnel.password) == (12345, "u", "p")
+
+
+def test_health_pass_does_not_revive_deleted_tunnel(monkeypatch):
+    tunnel = make_tunnel("tu_deleted", state="running")
+    tunnel.node_count_requested = tunnel.node_count_granted = 1
+    store = TopUpStore(tunnel, [_alive_node("n1")])
+    controller = HealController(running=True)
+    engine = Engine(Settings(), store, Assigner(Settings()), controller)
+
+    def probe(nodes, **kwargs):
+        store._tunnels.pop(tunnel.tunnel_id)
+        return {n.node_id: ProbeResult(n.node_id, alive=False) for n in nodes}
+
+    monkeypatch.setattr("engine.scheduler.batch_probe", probe)
+    assert engine.health_check(tunnel) == (0, 0)
+    assert controller.updated == []
+    assert engine._health_busy == set()

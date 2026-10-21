@@ -103,7 +103,7 @@ h2 .hicon { width: 14px; height: 14px; color: var(--faint); flex: none; }
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(14px) saturate(1.4);
 }
-..brand {
+.brand {
   display: inline-flex; align-items: center; gap: .55rem;
   font: 700 1.05rem/1 var(--display);
   letter-spacing: -0.01em;
@@ -155,7 +155,8 @@ h2 .hicon { width: 14px; height: 14px; color: var(--faint); flex: none; }
   padding: 0;
 }
 @media (max-width: 560px) {
-  body:not([data-pill-mode="expanded"]) .pill-toggle { display: flex; }
+  .pill-toggle { display: flex; }
+  body[data-pill-mode="expanded"] #conn-pill { margin-left: 0; }
 }
 .pill-toggle .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--untested); }
 .pill-toggle[data-state="live"] { border-color: rgba(18, 165, 111, 0.45); }
@@ -236,6 +237,7 @@ main { max-width: 1200px; margin: 1.2rem auto; padding: 0 1.2rem 3rem; position:
 
 .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 .chart-card {
+  min-width: 0;
   background: rgba(255, 255, 255, 0.85);
   border: 1px solid var(--border);
   border-radius: 18px;

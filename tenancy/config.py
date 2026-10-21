@@ -72,4 +72,5 @@ class TenancySettings:
             max_nodes_per_tunnel=_env_int("INFINITY_TENANCY_MAX_NODES", 20),
             credit_interval_s=_env_int("INFINITY_TENANCY_CREDIT_INTERVAL_S", 3600),
             meter_enabled=_env_bool("INFINITY_TENANCY_METER_ENABLED", "1"),
+            ledger_keep=_env_int("INFINITY_TENANCY_LEDGER_KEEP", 50),
         )

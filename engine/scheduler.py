@@ -54,6 +54,7 @@ class Engine:
         self._refreshing: set[str] = set()
         self._refresh_lock = threading.Lock()
         self._health_busy: set[str] = set()
+        self._pending_redeploy: set[str] = set()
         self._last_working_set_s: float | None = None
 
     def start(self) -> None:
@@ -90,6 +91,7 @@ class Engine:
                 self._strikes.pop(entry, None)
             self._health_busy.discard(tunnel_id)
             self._rendered.pop(tunnel_id, None)
+            self._pending_redeploy.discard(tunnel_id)
         self._last_check.pop(tunnel_id, None)
         self._swapped_24h.pop(tunnel_id, None)
         self._restarted_24h.pop(tunnel_id, None)
@@ -187,15 +189,13 @@ class Engine:
             if n is not None
         ]
         swapped = 0
-
+        results = {}
         if assigned:
             results = batch_probe(
                 assigned,
                 batch_size=self.settings.batch_size,
                 timeout_s=self.settings.probe_timeout_s,
             )
-            # Record windowed availability counters for the 30s health stream
-            # (ADR-0009, Phase 1) before any swap decisions are made on it.
             if self.settings.stability_enabled:
                 self.store.apply_probe_results(
                     results,
@@ -204,14 +204,39 @@ class Engine:
                 )
             else:
                 self.store.apply_probe_results(results)
-            with self._lock:
-                swapped = self._apply_health_verdicts(tunnel, assigned, results)
-        added = self._after_provision(tunnel_id)
-        if self._change_marker(tunnel_id) or swapped or added:
-            self._clear_change_marker(tunnel_id)
+        # Serialize assignment and grant updates across tunnels, but never hold
+        # this lock during the slow probes or container deployment.
+        with self._lock:
+            fresh = self.store.get_tunnel(tunnel_id)
+            if fresh is None or fresh.state in {"starting", "stopped"}:
+                return 0, 0
+            if assigned:
+                swapped = self._apply_health_verdicts(fresh, assigned, results)
+            added = self._after_provision(tunnel_id)
+            if swapped or added:
+                self._pending_redeploy.add(tunnel_id)
+            pending = tunnel_id in self._pending_redeploy
+        if pending:
             self._redeploy(tunnel_id)
         self._self_heal(tunnel_id)
         return swapped, added
+
+    def _after_provision(self, tunnel_id: str) -> int:
+        """Fill a degraded tunnel from the current pool, under the engine lock."""
+        fresh = self.store.get_tunnel(tunnel_id)
+        if fresh is None or not fresh.degraded:
+            return 0
+        added = len(
+            self.assigner.top_up(
+                self.store,
+                tunnel_id,
+                fresh.node_count_requested,
+                protocols=set(ASSIGNABLE_PROTOCOLS),
+            )
+        )
+        if added:
+            self._bump_granted(tunnel_id, added)
+        return added
 
     def _apply_health_verdicts(
         self, tunnel: Tunnel, assigned: list, results: dict
@@ -254,7 +279,7 @@ class Engine:
             logger.warning("docker unreachable; cannot self-heal %s", tunnel_id)
             return
         logger.warning("tunnel %s container not running; redeploying", tunnel_id)
-        if self._redeploy(tunnel_id):
+        if self._redeploy(tunnel_id, force=True):
             self._record_event(self._restarted_24h, tunnel_id)
 
     def _bump_granted(self, tunnel_id: str, delta: int) -> None:
@@ -265,10 +290,10 @@ class Engine:
         tunnel.state = "running"
         self.store.save_tunnel(tunnel)
 
-    def _redeploy(self, tunnel_id: str) -> bool:
+    def _redeploy(self, tunnel_id: str, force: bool = False) -> bool:
         """Redeploy a tunnel's config; True when a new container was rolled."""
         tunnel = self.store.get_tunnel(tunnel_id)
-        if tunnel is None:
+        if tunnel is None or tunnel.state in {"starting", "stopped"}:
             return False
         ids = self.store.node_ids_assigned_to(tunnel_id)
         nodes = [
@@ -279,12 +304,12 @@ class Engine:
             and n.protocol in ASSIGNABLE_PROTOCOLS
         ]
         signature = tuple(sorted(n.node_id for n in nodes))
-        if not signature:
-            return False
         if (
-            self._rendered.get(tunnel_id, ("", None))[0] == signature
-            and (self._rendered[tunnel_id][1])
+            not force
+            and self._rendered.get(tunnel_id, ((), None))[0] == signature
+            and self._rendered.get(tunnel_id, ((), None))[1]
         ):
+            self._pending_redeploy.discard(tunnel_id)
             return False
         config = render_config(
             tunnel, nodes, urltest_interval_s=self.settings.urltest_interval_s
@@ -295,6 +320,7 @@ class Engine:
             logger.warning("tunnel %s not redeployed: %s", tunnel_id, exc)
             return False
         self._rendered[tunnel_id] = (signature, config)
+        self._pending_redeploy.discard(tunnel_id)
         return True
 
     def _source_loop(self) -> None:

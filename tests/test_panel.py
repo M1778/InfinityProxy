@@ -148,18 +148,32 @@ def panel():
     return app.test_client(), fake
 
 
-def test_snapshot_placeholder(panel):
-    test, _ = panel
-    res = test.get("/api/snapshot")
+def test_snapshot_route_crawls_without_watchers(panel):
+    test, fake = panel
+    # The fallback route must fetch on request: an idle panel (no SSE
+    # watchers) otherwise serves state the sleeping crawl thread never wrote.
+    assert fake.calls == []
+    body = test.get("/api/snapshot").get_json()
+    assert body["reachable"] is True
+    assert ("status",) in fake.calls
+    # A second GET re-crawls: the route never replays a stale snapshot.
+    test.get("/api/snapshot")
+    assert fake.calls.count(("status",)) == 2
+
+
+def test_snapshot_route_answers_when_engine_down():
+    fake = EngineDown()
+    app = create_app(settings=PanelSettings(), engine=fake, poll=False)
+    app.config["TESTING"] = True
+    res = app.test_client().get("/api/snapshot")
     assert res.status_code == 200
     body = res.get_json()
     assert body["reachable"] is False
-    assert body["t"] == 0.0
+    assert body["error"]["code"] == "engine_unreachable"
 
 
 def test_crawl_updates_snapshot_and_history(panel):
     test, _ = panel
-    test.application.crawl_once()
     res = test.get("/api/snapshot")
     assert res.status_code == 200
     body = res.get_json()

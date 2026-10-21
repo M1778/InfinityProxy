@@ -141,6 +141,26 @@ def test_score_nodes_orders_within_tier_a_by_composite() -> None:
     assert [n.node_id for n in ordered] == ["better", "faster"]
 
 
+def test_score_nodes_ages_out_stale_verdicts_from_tier_a() -> None:
+    # A node whose last verdict is older than max_age_s leaves Tier A even with
+    # perfect availability - the assignment path must see what the display
+    # path renders (engine/app.py passes the same horizon).
+    fresh = make_node("fresh", throughput_kb_s=300, probe_ok=90, probe_total=100)
+    fresh.last_probe_s = 190.0
+    stale = make_node("stale", throughput_kb_s=300, probe_ok=90, probe_total=100)
+    stale.last_probe_s = 100.0
+    ordered = score_nodes(
+        [stale, fresh],
+        min_probes=6,
+        min_avail=0.4,
+        weight_avail=0.6,
+        weight_speed=0.4,
+        max_age_s=60.0,
+        now=200.0,
+    )
+    assert [n.node_id for n in ordered] == ["fresh", "stale"]
+
+
 def test_speed_percentile_decays_stale_measurement() -> None:
     # A measurement stamped outside the freshness horizon ranks as if the node
     # were never measured; a fresh measurement ranks normally.

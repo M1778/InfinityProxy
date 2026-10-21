@@ -78,14 +78,6 @@
     };
     setMode();
     if (mq.addEventListener) mq.addEventListener("change", setMode);
-    const toggle = document.querySelector("#pill-toggle");
-    if (toggle) {
-      toggle.addEventListener("click", () => {
-        const expanded = document.body.dataset.pillMode === "expanded";
-        document.body.dataset.pillMode = expanded ? "collapsed" : "expanded";
-        toggle.setAttribute("aria-expanded", String(!expanded));
-      });
-    }
   }
 
   /* The static build has no server to confirm liveness, so the apps pill

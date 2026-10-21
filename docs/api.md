@@ -427,8 +427,8 @@ authenticates clients itself; see the engine session below).
 | --- | --- |
 | `POST /v1/tenants/register` | Body `{"title","email","node_count"?}`. Issues a `user_…` operator key, grants `INFINITY_TENANCY_STARTING_CREDITS`, records the signup grant on the ledger. |
 | `GET /v1/me` | Yours: profile (`tenant_id`, `tenant_key`, `title`, `email`, `state`, `node_count_requested`, `created_at`, `credits`, `credited_at`) + scoped, cred-free `leases[]`. |
-| `GET /v1/me/ledger` | Newest-first `{at_s, tenant_id, delta, reason}` entries. |
-| `POST /v1/me/tunnels` | Provisions through the engine (`node_count` clamped to `INFINITY_TENANCY_MAX_NODES`) and links the lease. Gated on credits ≥ 1 and the per-tenant cap. |
+| `GET /v1/me/ledger` | Newest-first `{at_s, tenant_id, delta, reason}` entries, limited by `INFINITY_TENANCY_LEDGER_KEEP` (50 by default). Meter deltas are actual debits; unpaid shortfall is recorded in `reason`, not negative balance or debt. |
+| `POST /v1/me/tunnels` | Reserves a lease slot before provisioning through the engine (`node_count` clamped to `INFINITY_TENANCY_MAX_NODES`). Returns only `{id,host,port,state}`. Gated on credits ≥ 1 when metering is enabled and on the per-tenant cap including in-flight reservations. Definite rejection releases the slot; uncertain creation or failed ownership finalization keeps it counted until deletion or host reconciliation. |
 | `DELETE /v1/me/tunnels/{id}` | Engine delete + unlink. A foreign id is `404` — checked before the engine is called at all. |
 | `POST /v1/me/tunnels/{id}/renew` | Engine renewal, mapped through the scope. |
 | `GET /v1/me/proxy-clients` | The panel's observed proxy-client rows from the tenant's leases (when the panel feeds them in via the admin surface below). |
@@ -441,7 +441,7 @@ authenticates clients itself; see the engine session below).
 | `POST /v1/admin/tenants` | Manually issue a seeded account (`{"title","email"?}`). |
 | `POST /v1/admin/tenants/{id}/grant` | `{"amount"}` → adds credits + `admin grant` ledger row. |
 | `POST /v1/admin/tenants/{id}/rotate` | New key; the old `X-Operator-Key` becomes `401` immediately. |
-| `POST /v1/admin/tenants/{id}/disable` | Freezes the account (subsequent calls: `403 disabled`) and tears down each of the tenant's leases via the engine. |
+| `POST /v1/admin/tenants/{id}/disable` | Freezes the account (`403 disabled`) before attempting all owned lease deletes. Returns 200 `{tenant,cleanup_pending:[ids]}`; failed deletes stay linked and repeating disable retries them. Missing tunnels (404) are unlinked. A pending teardown may still accept the tunnel's own credentials. |
 | `GET /v1/admin/proxy-clients` | Recently observed proxy clients per account (the panel maps client rows to tenants). |
 
 ### Public surface
@@ -451,7 +451,8 @@ authenticates clients itself; see the engine session below).
 | `GET /health` | Liveness echo. |
 | `GET /v1/public/pool` | The ten public pool fields the panel charts. Engine-only extras do not cross (whitelist + shape). |
 | `GET /v1/public/tunnels` | Active tenants and their leases, endpoint-only (`id/port/state`, no credentials). |
-| `GET /v1/public/stats` | `{tenants, credits_outstanding, metered_since_s}` snapshot. |
+| `GET /v1/public/stats` | Read-only `{tenants, credits_outstanding, metered_since_s}` snapshot; never drains credits or writes the ledger. |
+| `GET /` | Service name, configured `title`, and links to registration, tenant, admin and public routes. |
 
 ### Engine failure passes through
 
@@ -543,7 +544,7 @@ Control center settings (`INFINITY_TENANCY_*`, ADR-0012):
 | `INFINITY_TENANCY_MAX_TENANTS` | `50` | Registration cap; signups beyond answer `503 board_full` |
 | `INFINITY_TENANCY_MAX_TUNNELS` | `4` | Per-tenant lease cap; provisioning beyond answers `409 lease_limit` |
 | `INFINITY_TENANCY_MAX_NODES` | `20` | Per-tunnel node-count ceiling for tenant requests (clamped, not rejected) |
-| `INFINITY_TENANCY_CREDIT_INTERVAL_S` | `3600` | Wall-clock seconds one credit covers; `0` disables metering |
+| `INFINITY_TENANCY_CREDIT_INTERVAL_S` | `3600` | Wall-clock seconds one credit covers; ≤ 0 disables metering and the provisioning credit gate |
 | `INFINITY_TENANCY_METER_ENABLED` | `1` | Metering on/off. Off = provisioning stays credit-free |
 | `INFINITY_TENANCY_LEDGER_KEEP` | `50` | Ledger rows kept per tenant |
 
@@ -560,6 +561,8 @@ Source cadences are per-source (see [docs/scraping.md](./scraping.md#source-mani
 | `source_refresh_failed` | 502 | Manual source scrape could not be queued |
 | `tunnel_runtime` | 503 | Cannot spawn/roll a tunnel: docker daemon refused the operation (e.g. overlay mount busy); the tunnel is rolled back and no nodes are left stranded |
 | `dial_failed` | 502 | Panel egress test (`POST /tunnels/{id}/test`) could not connect through the tunnel (all its assigned nodes dead, or the tunnel is down) |
+| `renew_failed` | 502 | Renewal probe/store/config failure; details are logged locally, not returned |
+| `docker_unreachable` | 502 | Tunnel runtime unavailable during manual renewal |
 | `internal` | 500 | Unexpected engine failure |
 | `host_features_disabled` | 409 | Host endpoints hit while `INFINITY_HOST_ENABLED` is `0` |
 | `hostagent_unreachable` | 502 | The hostagent control API is down (`INFINITY_HOSTAGENT_URL`) |
@@ -577,6 +580,7 @@ Control center error codes (ADR-0012):
 | `admin_not_configured` | 409 | `/v1/admin/*` on a board without `INFINITY_TENANCY_ADMIN_KEY` |
 | `out_of_credits` | 402 | Provisioning while below one credit |
 | `board_full` | 503 | Registration at `INFINITY_TENANCY_MAX_TENANTS` |
+| `lease_finalize_failed` | 502 | Engine created a tunnel but its ownership could not be saved; deletion is attempted, and unresolved capacity remains reserved |
 | `lease_limit` | 409 | Provisioning at `INFINITY_TENANCY_MAX_TUNNELS` |
 | `engine_unreachable` | 502 | Engine request failed outright (timeout/refused) |
 

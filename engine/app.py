@@ -295,7 +295,16 @@ def create_app(
         tunnel = store.get_tunnel(tunnel_id)
         if tunnel is None:
             return err("not_found", f"no tunnel {tunnel_id}", 404)
-        swapped, added = engine.health_check(tunnel)
+        try:
+            swapped, added = engine.health_check(tunnel)
+        except TunnelRuntimeUnavailable:
+            logger.exception("renew runtime unavailable for %s", tunnel_id)
+            return err(
+                "docker_unreachable", "tunnel runtime unavailable during renew", 502
+            )
+        except Exception:  # noqa: BLE001 - keep renew errors in the JSON contract
+            logger.exception("renew of %s failed", tunnel_id)
+            return err("renew_failed", "tunnel renewal failed", 502)
         fresh = store.get_tunnel(tunnel_id)
         return jsonify(
             {

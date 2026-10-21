@@ -95,12 +95,15 @@ class Assigner:
         if self.settings.stability_enabled:
             # ADR-0009 membership vote: Tier A, then Tier B, then cold nodes,
             # each ordered by weighted availability + within-protocol speed.
+            # Aged verdicts (ADR-0009) leave Tier A exactly as the display path
+            # renders them - engine/app.py passes the same window.
             return score_nodes(
                 nodes,
                 min_probes=self.settings.stability_min_probes,
                 min_avail=self.settings.stability_min_avail,
                 weight_avail=self.settings.stability_weight_avail,
                 weight_speed=self.settings.stability_weight_speed,
+                max_age_s=self.settings.stability_max_age_s,
             )
         return _prefer_best(nodes)
 

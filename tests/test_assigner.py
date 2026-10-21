@@ -343,6 +343,20 @@ def test_release_tunnel_missing_row_still_frees_nodes():
     assert store.node_ids_in_use() == []
 
 
+def test_assignment_demotes_stale_tier_a_nodes(monkeypatch):
+    monkeypatch.setattr("engine.stability.time.time", lambda: 100000.0)
+    settings = stability_settings()
+    store = FakeStore()
+    stale = make_node("stale", throughput_kb_s=9000, probe_ok=100, probe_total=100)
+    stale.last_probe_s = 1.0
+    fresh = make_node("fresh", throughput_kb_s=200, probe_ok=90, probe_total=100)
+    fresh.last_probe_s = 100000.0
+    store.add_node(stale)
+    store.add_node(fresh)
+    granted = Assigner(settings).assign_new(store, "t1", requested=1)
+    assert [node.node_id for node in granted] == ["fresh"]
+
+
 def test_create_tunnel_config_saves_tunnel_with_granted_count():
     assigner = Assigner(tiny_settings())
     store = FakeStore()

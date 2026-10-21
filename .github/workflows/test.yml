@@ -16,3 +16,8 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Run unit tests
         run: pytest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Run frontend regressions
+        run: node --test tests/panel_frontend.test.cjs

@@ -68,13 +68,14 @@ class FakeEdge:
 
 
 def make_settings(**kw: Any) -> TenancySettings:
-    return TenancySettings(
-        admin_key="adm-secret",
-        starting_credits=48,
-        max_tunnels_per_tenant=2,
-        meter_enabled=True,
-        **kw,
-    )
+    defaults: dict[str, Any] = {
+        "admin_key": "adm-secret",
+        "starting_credits": 48,
+        "max_tunnels_per_tenant": 2,
+        "meter_enabled": True,
+    }
+    defaults.update(kw)
+    return TenancySettings(**defaults)
 
 
 def fresh_store() -> TenantsStore:
@@ -295,6 +296,51 @@ def test_metered_drain_debits_per_elapsed_period() -> None:
     assert refreshed.credits == 47
 
 
+def test_metered_drain_records_shortfall_not_wedge() -> None:
+    client, _, store = boot_app(credit_interval_s=3600)
+    tenant = register(client)
+    row = store.get_tenant(tenant["tenant_id"])
+    assert row is not None
+    assert row.credited_s is not None
+    start = row.credited_s
+    row.credits = 0.4
+    store.save_tenant(row)
+    from tenancy import billing
+
+    debit = billing.drain_elapsed(store, row, 3600, start + 5400)
+    assert debit == 0.4
+    refreshed = store.get_tenant(tenant["tenant_id"])
+    assert refreshed is not None
+    assert refreshed.credits == 0.0
+    # The period boundary still ticked: a later refill makes metering resume,
+    # instead of the debit silently growing every call.
+    again = billing.drain_elapsed(store, refreshed, 3600, start + 5400)
+    assert again == 0.0
+    ledger = client.get("/v1/me/ledger", headers=op_headers(tenant)).get_json()[
+        "ledger"
+    ]
+    metered = [e for e in ledger if "metered" in e["reason"]]
+    assert metered and "shortfall 0.6" in metered[0]["reason"]
+
+
+def test_concurrent_drains_never_double_charge() -> None:
+    client, _, store = boot_app(credit_interval_s=3600)
+    tenant = register(client)
+    row = store.get_tenant(tenant["tenant_id"])
+    assert row is not None
+    assert row.credited_s is not None
+    start = row.credited_s
+    from tenancy import billing
+
+    first = billing.drain_elapsed(store, row, 3600, start + 5400)
+    second = billing.drain_elapsed(store, row, 3600, start + 5400)
+    assert first == 1.0
+    assert second == 0.0
+    refreshed = store.get_tenant(tenant["tenant_id"])
+    assert refreshed is not None
+    assert refreshed.credits == 47
+
+
 def test_disabled_key_is_rejected() -> None:
     client, _, store = boot_app()
     tenant = register(client)
@@ -459,6 +505,43 @@ def test_credit_interval_zero_disables_metering() -> None:
     assert row is not None
     debit = billing.drain_elapsed(store, row, 0, row.credited_s + 999999)
     assert debit == 0.0
+
+
+def test_meter_disabled_board_provisions_at_zero_credits() -> None:
+    client, _, store = boot_app(meter_enabled=False)
+    tenant = register(client)
+    row = store.get_tenant(tenant["tenant_id"])
+    assert row is not None
+    row.credits = 0.0
+    store.save_tenant(row)
+    res = client.post("/v1/me/tunnels", headers=op_headers(tenant), json={})
+    assert res.status_code == 201
+    assert "username" not in res.get_json()
+
+
+def test_shape_uses_tunnel_host_override() -> None:
+    client, _, _ = boot_app(public_tunnel_host="leases.example.net")
+    tenant = register(client)
+    res = client.post("/v1/me/tunnels", headers=op_headers(tenant), json={})
+    lease = res.get_json()
+    assert lease["host"] == "leases.example.net"
+
+
+def test_index_advertises_page_title() -> None:
+    client, _, _ = boot_app(tenant_page_title="Leaseboard")
+    assert client.get("/").get_json()["title"] == "Leaseboard"
+
+
+def test_public_stats_is_read_only() -> None:
+    client, _, store = boot_app(credit_interval_s=3600)
+    register(client)
+    before = store.total_credits()
+    res = client.get("/v1/public/stats")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert set(data) == {"tenants", "credits_outstanding", "metered_since_s"}
+    # A public GET must not writer-own the ledger.
+    assert store.total_credits() == before
 
 
 def test_board_full_rejects_registrations() -> None:

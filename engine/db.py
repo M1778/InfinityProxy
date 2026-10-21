@@ -293,11 +293,45 @@ class Store:
                     (n.as_insert_row() for n in fresh),
                 )
             if known_rows:
+                # A URI/protocol change means a different endpoint behind the
+                # same node_id: every stored verdict (state, latency,
+                # throughput, stability counters) described the old one and
+                # must not survive into the admission gate.
                 self._conn.executemany(
                     """UPDATE nodes SET uri = :uri, protocol = :protocol,
                            state = CASE
                                WHEN uri != :uri OR protocol != :protocol
-                               THEN 'untested' ELSE state END
+                               THEN 'untested' ELSE state END,
+                           last_latency_ms = CASE
+                               WHEN uri != :uri OR protocol != :protocol
+                               THEN NULL ELSE last_latency_ms END,
+                           throughput_kb_s = CASE
+                               WHEN uri != :uri OR protocol != :protocol
+                               THEN NULL ELSE throughput_kb_s END,
+                           throughput_measured_s = CASE
+                               WHEN uri != :uri OR protocol != :protocol
+                               THEN NULL ELSE throughput_measured_s END,
+                           probe_ok = CASE
+                               WHEN uri != :uri OR protocol != :protocol
+                               THEN 0 ELSE probe_ok END,
+                           probe_total = CASE
+                               WHEN uri != :uri OR protocol != :protocol
+                               THEN 0 ELSE probe_total END,
+                           window_started_s = CASE
+                               WHEN uri != :uri OR protocol != :protocol
+                               THEN NULL ELSE window_started_s END,
+                           last_probe_s = CASE
+                               WHEN uri != :uri OR protocol != :protocol
+                               THEN NULL ELSE last_probe_s END,
+                           last_alive_s = CASE
+                               WHEN uri != :uri OR protocol != :protocol
+                               THEN NULL ELSE last_alive_s END,
+                           score_f = CASE
+                               WHEN uri != :uri OR protocol != :protocol
+                               THEN NULL ELSE score_f END,
+                           last_error = CASE
+                               WHEN uri != :uri OR protocol != :protocol
+                               THEN NULL ELSE last_error END
                        WHERE node_id = :node_id""",
                     (n.as_insert_row() for n in known_rows),
                 )

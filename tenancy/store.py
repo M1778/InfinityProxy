@@ -7,9 +7,11 @@ migrating anything the engine wrote.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 import threading
 import time
+import uuid
 from typing import Self
 
 from tenancy.models import LedgerEntry, Tenant
@@ -42,6 +44,13 @@ CREATE TABLE IF NOT EXISTS tenant_tunnels (
     tunnel_id TEXT,
     created_at_s REAL,
     PRIMARY KEY (tenant_id, tunnel_id)
+);
+
+CREATE TABLE IF NOT EXISTS tunnel_reservations (
+    reservation_id TEXT PRIMARY KEY,
+    tenant_id TEXT,
+    created_at_s REAL,
+    tunnel_id TEXT
 );
 """
 
@@ -161,6 +170,9 @@ class TenantsStore:
             self._conn.execute(
                 "DELETE FROM tenant_tunnels WHERE tenant_id = ?", (tenant_id,)
             )
+            self._conn.execute(
+                "DELETE FROM tunnel_reservations WHERE tenant_id = ?", (tenant_id,)
+            )
             self._conn.commit()
 
     def tenant_count(self) -> int:
@@ -184,12 +196,12 @@ class TenantsStore:
             )
             self._conn.commit()
 
-    def ledger(self, tenant_id: str, keep: int = 20) -> list[LedgerEntry]:
+    def ledger(self, tenant_id: str, keep: int = 50) -> list[LedgerEntry]:
         """Latest `keep` entries, newest first."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT at_s, tenant_id, delta, reason FROM ledger "
-                "WHERE tenant_id = ? ORDER BY at_s DESC LIMIT ?",
+                "WHERE tenant_id = ? ORDER BY at_s DESC, rowid DESC LIMIT ?",
                 (tenant_id, keep),
             ).fetchall()
         return [
@@ -202,21 +214,84 @@ class TenantsStore:
             for row in rows
         ]
 
+    def _prune_ledger(self, tenant_id: str, keep: int) -> None:
+        self._conn.execute(
+            "DELETE FROM ledger WHERE tenant_id = ? AND rowid NOT IN "
+            "(SELECT rowid FROM ledger WHERE tenant_id = ? "
+            " ORDER BY at_s DESC, rowid DESC LIMIT ?)",
+            (tenant_id, tenant_id, max(0, keep)),
+        )
+
     def prune_ledger(self, tenant_id: str, keep: int) -> None:
-        """Drop all but the newest `keep` entries for a tenant."""
-        with self._lock:
-            self._conn.execute(
-                "DELETE FROM ledger WHERE tenant_id = ? AND at_s NOT IN "
-                "(SELECT at_s FROM ledger WHERE tenant_id = ? "
-                " ORDER BY at_s DESC LIMIT ?)",
-                (tenant_id, tenant_id, keep),
-            )
-            self._conn.commit()
+        """Drop all but the newest `keep` entries, including timestamp ties."""
+        with self._lock, self._conn:
+            self._prune_ledger(tenant_id, keep)
 
     def total_credits(self) -> float:
         with self._lock:
             row = self._conn.execute("SELECT SUM(credits) FROM tenants").fetchone()
         return float(row[0]) if row and row[0] is not None else 0.0
+
+    def reserve_tunnel(
+        self, tenant_id: str, cap: int, min_credits: float = 0.0
+    ) -> str | None:
+        """Reserve capacity before provisioning; one INSERT guards every worker."""
+        reservation_id = uuid.uuid4().hex
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """INSERT INTO tunnel_reservations
+                       (reservation_id, tenant_id, created_at_s)
+                   SELECT ?, tenant_id, ? FROM tenants
+                   WHERE tenant_id = ? AND state = 'active' AND credits >= ?
+                     AND (SELECT COUNT(*) FROM tenant_tunnels WHERE tenant_id = ?)
+                       + (SELECT COUNT(*) FROM tunnel_reservations WHERE tenant_id = ?)
+                       < ?""",
+                (
+                    reservation_id,
+                    time.time(),
+                    tenant_id,
+                    min_credits,
+                    tenant_id,
+                    tenant_id,
+                    cap,
+                ),
+            )
+        return reservation_id if cur.rowcount == 1 else None
+
+    def note_reservation_tunnel(self, reservation_id: str, tunnel_id: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE tunnel_reservations SET tunnel_id = ? WHERE reservation_id = ?",
+                (tunnel_id, reservation_id),
+            )
+
+    def release_reservation(self, reservation_id: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM tunnel_reservations WHERE reservation_id = ?",
+                (reservation_id,),
+            )
+
+    def complete_reservation(
+        self, tenant_id: str, reservation_id: str, tunnel_id: str
+    ) -> bool:
+        """Keep ownership even if disable raced provisioning, so cleanup can retry."""
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            cur = self._conn.execute(
+                "INSERT INTO tenant_tunnels (tenant_id, tunnel_id, created_at_s) "
+                "SELECT tenant_id, ?, created_at_s FROM tunnel_reservations "
+                "WHERE reservation_id = ? AND tenant_id = ?",
+                (tunnel_id, reservation_id, tenant_id),
+            )
+            self._conn.execute(
+                "DELETE FROM tunnel_reservations WHERE reservation_id = ?",
+                (reservation_id,),
+            )
+            row = self._conn.execute(
+                "SELECT state FROM tenants WHERE tenant_id = ?", (tenant_id,)
+            ).fetchone()
+        return cur.rowcount == 1 and row is not None and row[0] == "active"
 
     def link_tunnel(self, tenant_id: str, tunnel_id: str) -> None:
         with self._lock:
@@ -269,14 +344,86 @@ class TenantsStore:
             self._conn.commit()
         return cur.rowcount == 1
 
-    def grant(self, tenant_id: str, amount: float, now: float) -> None:
-        with self._lock:
+    def drain(
+        self, tenant_id: str, credit_interval_s: int, now: float, keep: int = 50
+    ) -> tuple[Tenant | None, float]:
+        """Read the balance, tick and ledger under the same SQLite write lock."""
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT * FROM tenants WHERE tenant_id = ?", (tenant_id,)
+            ).fetchone()
+            if row is None:
+                return None, 0.0
+            tenant = self._row_to_tenant(row)
+            if (
+                tenant.state != "active"
+                or credit_interval_s <= 0
+                or tenant.credited_s is None
+            ):
+                return tenant, 0.0
+            periods = int((now - tenant.credited_s) // credit_interval_s)
+            if periods <= 0:
+                return tenant, 0.0
+            due = float(periods)
+            actual = min(due, max(0.0, tenant.credits))
+            reason = f"{periods * credit_interval_s // 3600}h metered"
+            if actual < due:
+                reason += f", shortfall {due - actual:g}"
+            boundary = tenant.credited_s + periods * credit_interval_s
+            self._conn.execute(
+                "UPDATE tenants SET credits = credits - ?, credited_s = ?, "
+                "updated_at_s = ? WHERE tenant_id = ? AND credited_s = ?",
+                (actual, boundary, now, tenant_id, tenant.credited_s),
+            )
+            self._conn.execute(
+                "INSERT INTO ledger (at_s, tenant_id, delta, reason) "
+                "VALUES (?, ?, ?, ?)",
+                (now, tenant_id, -actual, reason),
+            )
+            self._prune_ledger(tenant_id, keep)
+            tenant.credits -= actual
+            tenant.credited_s = boundary
+            tenant.updated_at_s = now
+        return tenant, actual
+
+    def grant(self, tenant_id: str, amount: float, now: float, keep: int = 50) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT credits FROM tenants WHERE tenant_id = ?", (tenant_id,)
+            ).fetchone()
+            if row is None:
+                raise TenantNotFound(tenant_id)
+            if not math.isfinite(amount) or not math.isfinite(row[0] + amount):
+                raise ValueError("grant would create a non-finite balance")
             self._conn.execute(
                 "UPDATE tenants SET credits = credits + ?, updated_at_s = ? "
                 "WHERE tenant_id = ?",
                 (amount, now, tenant_id),
             )
-            self._conn.commit()
+            self._conn.execute(
+                "INSERT INTO ledger (at_s, tenant_id, delta, reason) "
+                "VALUES (?, ?, ?, ?)",
+                (now, tenant_id, amount, "admin grant"),
+            )
+            self._prune_ledger(tenant_id, keep)
+
+    def set_key(self, tenant_id: str, key: str, now: float) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE tenants SET tenant_key = ?, updated_at_s = ? "
+                "WHERE tenant_id = ?",
+                (key, now, tenant_id),
+            )
+
+    def disable(self, tenant_id: str, now: float) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE tenants SET state = 'disabled', updated_at_s = ? "
+                "WHERE tenant_id = ?",
+                (now, tenant_id),
+            )
 
 
 class TenantNotFound(Exception):

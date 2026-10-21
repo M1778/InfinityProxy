@@ -66,13 +66,15 @@ The panel backend *is* unit-tested against a fake engine client
 pytest            # unit tests
 ruff check .      # lint
 ruff format --check .   # formatting
+node --test tests/panel_frontend.test.cjs   # frontend regressions (Node 22)
 ```
 
 ## GitHub Actions CI
 
 Four workflows ship with the implementation:
 
-1. **test** — `pytest` on every push/PR (matrix across supported Python versions).
+1. **test** — `pytest` (Python 3.12) and dependency-free Node 22 frontend
+   regressions on every push/PR, including SSE fallback cadence and pill state.
 2. **lint** — `ruff check` + `ruff format --check` on every push/PR.
 3. **build-push** — build `engine` and `tunnel` images and push to GHCR on
    version tags (`v*`). Includes a `docker build --check`-style config lint where

@@ -252,7 +252,8 @@ sequenceDiagram
 - A node is probed with its own protocol handshake. After **2 consecutive
   failures** the node is marked dead and swapped.
 - A health pass runs its probes **outside the engine lock** and takes it only
-  for strike bookkeeping; a full batch takes seconds per node, and holding the
+  for strike bookkeeping, node assignment and granted-count updates; a full
+  batch takes seconds per node, and holding the
   lock that long would queue every renew request behind it. Passes are
   single-flight per tunnel: a scheduled pass and an API
   `POST /tunnels/{id}/renew` for the same tunnel never probe the same nodes in
@@ -273,7 +274,12 @@ sequenceDiagram
 
 Degraded tunnels (`granted_count < requested`) are topped up opportunistically
 on every health-check pass until they reach the requested count or the pool is
-genuinely starved.
+genuinely starved. The pass renders additions and removals into the container's
+config before checking container health, including a blocking config when no
+nodes remain. A failed update stays pending and is retried on the next pass,
+even without another swap. Container recovery bypasses the unchanged-config
+cache. A tunnel deleted or stopped while its probes ran is not topped up or
+redeployed.
 
 ### Stability pipeline (ADR-0009)
 

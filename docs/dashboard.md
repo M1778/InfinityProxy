@@ -45,12 +45,15 @@ browser ── SSE ──► panel:8000 (Flask)
   `python -m panel`.
 - Zero-build frontend: `panel/static/{index.html,app.css,app.js,vendor/chart.umd.js}`
   (Chart.js UMD vendored once). Vanilla JS, no framework, no node toolchain.
-- SSE heartbeats every 15s; client reconnects with backoff; graceful degradation
-  to a 5s `fetch` poll when the stream drops. The crawl thread itself only
-  calls the engine while at least one SSE watcher is connected — an idle panel
-  imposes zero per-5s load on the engine — and a crawl exception is logged and
-  retried on the next tick instead of killing the thread (whose death would
-  silently freeze every watcher's dashboard at a stale state).
+- SSE heartbeats every 15s; EventSource reconnects automatically. While the
+  stream is down, the browser fetches `GET /api/snapshot` every 5s with at most
+  one request in flight. Stream recovery stops the fallback and late HTTP
+  answers cannot overwrite the recovered stream. The crawl thread only calls
+  the engine while at least one SSE watcher is connected, so an idle panel
+  imposes no periodic engine load. `GET /api/snapshot` also crawls on demand:
+  first paint and fallback-only viewers can refresh without an SSE watcher.
+  Concurrent crawls are single-flight. Crawl exceptions are logged and retried
+  instead of killing the thread and freezing the dashboard.
 - "Test tunnel" button: the panel dials `https://api.ipify.org` *through* the
   tunnel (CONNECT) and reports the exit IP + latency — the only feature that
   needs panel-originated outbound traffic (env `INFINITY_PANEL_TEST_URL`).
@@ -88,8 +91,10 @@ instead of a framework:
 - **Connection pill** — under 560px the pill starts collapsed
   (`data-pill-mode="collapsed"` on `body`) and shows only the colored dot;
   `#pill-toggle` (a dot-only button next to it, `aria-expanded` reflecting the
-  mode) re-expands it. `setPillMode()` only re-imposes the collapsed default
-  when connectivity flips, so an explicit toggle survives every snapshot.
+  mode) expands and collapses it, remaining visible in both modes. Manual
+  expansion survives snapshots and resets only when connectivity or viewport
+  mode changes. Chart grid items can shrink below the canvases' intrinsic width
+  (`min-width: 0`), avoiding horizontal overflow on phones.
 - **`#page-title` bar** — only visible on the phone pass; the hash router
   writes the current view's capitalized name (`route()` in `app.js`) so the
   hidden `tablabel` doesn't lose the context.

@@ -69,14 +69,37 @@ component with its own address and store, chosen over engine-side auth.
   level. `read_pool` projects the ten public pool counters; operator-only
   engine extras (`by_protocol`, `stale_sources`) do not reach the board.
 - **Credits**: registration grants `INFINITY_TENANCY_STARTING_CREDITS`
-  (default 720 — 30 days at the default one credit per hour); every meter
-  pulls the elapsed boundary forward (`credited_s`) and appends to a
-  per-tenant `ledger` (newest-first, kept to the last 50). Tunnel provisioning
-  requires credits ≥ 1 and (when metering is enabled) debits
-  `credit_interval_s` per period on touch. Meter off = creation stays allowed.
+  (default 720 — 30 days at one credit per hour). Authenticated touches charge
+  one credit per full `credit_interval_s` elapsed, advancing `credited_s`.
+  The meter reads the current balance, updates the boundary and appends its
+  ledger entry in one SQLite write transaction, so concurrent touches charge
+  a boundary once and do not erase grants or key/state changes. The ledger
+  delta is the amount actually paid, capped at the balance; its reason records
+  any unpaid shortfall. The boundary advances even at zero balance: shortfall
+  is informational, not debt collected from a later grant. Every grant and
+  meter write retains the configured newest ledger rows (default 50).
+  Provisioning requires credits ≥ 1 only when metering is enabled; meter off
+  or a non-positive interval disables both metering and the credit gate.
+  Public statistics are read-only and never trigger metering.
 - **Caps**: `max_tenants` (`board_full` on signup at 503), per-tenant
   `max_tunnels_per_tenant` (`lease_limit`, 409), per-tunnel
-  `max_nodes_per_tunnel` (registers request node_count, clamped).
+  `max_nodes_per_tunnel` (registers request node_count, clamped). A durable
+  `tunnel_reservations` row occupies a lease slot before the engine call.
+  A single guarded INSERT counts linked leases plus reservations across
+  SQLite connections; success converts the reservation to ownership. A
+  definite creation rejection releases the slot. Timeout, malformed success
+  or failed ownership finalization keeps it counted unless compensating
+  deletion succeeds (or confirms 404). Known tunnel ids are saved on the
+  reservation. Reservations left by process termination also remain counted;
+  recovery requires reconciling the engine's tunnels before clearing stranded
+  slots. This prevents an uncertain live tunnel from disappearing from the cap.
+- **Disable cleanup**: the state change revokes the key before teardown. Deletes
+  use the durable ownership mapping even when engine listing is unavailable.
+  The response remains 200 with `cleanup_pending` ids for failed deletes;
+  those ids stay linked and repeating disable retries them. An already-missing
+  tunnel (404) is unlinked. A creation racing disable keeps ownership until
+  its cleanup succeeds. This revokes control-center access immediately; a
+  failed teardown does not revoke the still-running tunnel's own credentials.
 
 ## Consequences
 

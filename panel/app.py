@@ -186,6 +186,11 @@ def create_app(
 
     @app.get("/api/snapshot")
     def api_snapshot():
+        # Fetch-on-request, not replay: this is the fallback route for viewers
+        # whose SSE stream is down (or a first paint before the stream opens).
+        # Without a crawl it would serve cached state forever while the crawl
+        # thread sleeps on zero watchers - the dashboard looks live and is not.
+        crawl_once()
         return jsonify(snapshot())
 
     @app.get("/api/history")

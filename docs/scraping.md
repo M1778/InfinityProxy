@@ -107,7 +107,11 @@ certified alive only if that download delivers at least
 `INFINITY_THROUGHPUT_MIN_KB_S` — a handshake that relays nothing, or a relay
 slower than the floor, is demoted at admission. The measured KiB/s is stored on
 the node (`throughput_kb_s`), survives the handshake-only health loop, and is
-what the assigner prefers when filling tunnels. The throughput stage applies at
+what the assigner prefers when filling tunnels. Re-ingesting an unchanged URI
+preserves its verdicts. If the URI or protocol changes under an existing
+identity, the engine resets state to untested and clears latency, throughput,
+measurement timestamps, availability counters, score and error; evidence for
+the old URI cannot certify the new one. The throughput stage applies at
 admission only; the 30s health check stays a cheap handshake so the loop never
 hammers the host link.
 

@@ -171,7 +171,9 @@ credentials, the same as with the engine.
 **Credit**:
 One unit of wall-clock runtime, debited per full `credit_interval_s` elapsed
 (default one credit per hour). The signup grant and admin grants land in a
-per-tenant **ledger**. Provisioning requires credits ≥ 1.
+per-tenant **ledger**. Provisioning requires credits ≥ 1 when metering is enabled;
+meter off or a non-positive interval disables the credit gate. Meter ledger
+deltas record the amount actually paid, with any shortfall in the reason.
 
 ## Implementation notes (not domain)
 
